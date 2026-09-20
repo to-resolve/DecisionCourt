@@ -1,0 +1,90 @@
+# Dependencies
+node_modules/
+backend/vendor/
+frontend/.next/
+frontend/out/
+
+# Environment files
+.env
+.env.local
+.env.*.local
+.env.production
+!.env.example
+!.env.example.production
+
+# Build outputs
+backend/bin/
+backend/tmp/
+backend/backend.exe
+backend/server.exe
+tmp-server.exe
+tmp-server.exe~
+frontend/dist/
+frontend/.vercel
+
+# Logs
+*.log
+logs/
+log/
+
+# OS files
+.DS_Store
+.DS_Store?
+Thumbs.db
+._*
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Test coverage
+coverage/
+*.cover
+
+# Test artifacts（集成测试输出的 UUID-named JSON 快照；本地保留，仓库不追踪）
+backend/test-output/
+
+# Database
+*.db
+*.sqlite
+
+# Docker
+.dockerignore
+# 例外：frontend/.dockerignore 是构建正确性的一部分（排除 pnpm-workspace.yaml），必须入库
+!frontend/.dockerignore
+docker-compose.override.yml
+
+# WorkBuddy agent 工作区（记忆/日志，不属于项目代码）
+.workbuddy/
+
+# Local secrets backups
+*.env.bak
+*.env.backup
+secrets/
+
+# v1.0.3 PR-B1: promptlab 本地 YAML override (开发者在不改 base.yaml 的前提下
+# 临时试调 prompt; git 不追踪, 不污染正式版).
+backend/prompts/*.local.yaml
+
+# Agent 内部 spec / 工作区（不属于项目代码）
+.trae/
+
+# ZCode CLI session workspace（不属于项目代码）
+.zcode/
+
+# docs 内部材料（不暴露给外部贡献者）
+# —— 保留:adr / architecture / deployment/CHECKLIST / roadmap / decisioncourt-*.md(架构设计 + README 指向)
+# —— 忽略:interview(面试)/ archive(已归档旧计划)/ observability(白盒化案例含生产流程)
+# —— 忽略:dev-deploy-workflow(部署流程)/ security-audit(内部审计)/ OBSERVABILITY(可观测内部)/ project-ideas(灵感池)
+docs/interview/
+docs/archive/
+docs/observability/
+docs/dev-deploy-workflow.md
+docs/security-audit-v0.8.3.md
+docs/OBSERVABILITY.md
+docs/project-ideas.md
+# docs/archive/ 例外：以下历史决策归档对后来者有参考价值，需入库
+!docs/archive/ecs-end-of-life-2026-08-05.md
+!docs/archive/security-audit-2026-07-03.md

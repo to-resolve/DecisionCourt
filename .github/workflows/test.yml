@@ -1,0 +1,141 @@
+﻿name: Test
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+# 2025-09-19 GitHub 弃用 Node 20,2026-06-16 Runner 默认 Node 24。
+# 用 FORCE_JAVASCRIPT_ACTIONS_TO_NODE24=true 强制所有 action 跑 Node 24。
+# 同步把 action 升到 v6 (node24) — v5 仍为 node20,治标不治本。
+# 来源: https://github.blog/changelog/2025-09-19-deprecation-of-node-20-on-github-actions-runners/
+#
+# Action 版本对照 (node runtime):
+#   actions/checkout    v5=node20 → v6=node24
+#   actions/setup-go    v5=node20 → v6=node24 (v6 支持 go-version-file: 'go.mod' 自动读 go 1.26)
+#   actions/setup-node  v4=node20 → v5=node24
+#   pnpm/action-setup   v4=node24 (无需升)
+#   actions/setup-python v5=node24 (无需升)
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+jobs:
+  # ============== Backend ==============
+  backend-test:
+    name: Backend (Go)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ./backend
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          # go.mod 在 backend/ 下,setup-go 的 go-version-file 相对的是
+          # $GITHUB_WORKSPACE,所以要写完整路径 (v0.10.8 踩过这个坑:
+          #  'go.mod does not exist' = setup-go 在 $GITHUB_WORKSPACE 找 go.mod,
+          #  实际在 backend/go.mod)
+          go-version-file: 'backend/go.mod'
+          cache: true
+          cache-dependency-path: 'backend/go.sum'
+
+      - name: Resolve modules
+        run: go mod download
+
+      - name: go vet
+        run: go vet ./...
+
+      - name: Build
+        run: go build ./...
+
+      - name: Unit tests
+        # v0.10.4: 跳过 v0.9.4 HA-001 spec 占位测试
+        # finding_evidence_confusion_test.go 含 4 个 case 标记"该修复还没做"。
+        # 修复 spec 是 v0.9.4 独立工作，spec 修复前 CI 用 -skip 避免 fail。
+        # v0.10.9: 加 -v 详细输出 + tee 到 log.txt,然后 upload artifact 公开下载
+        # (WebFetch 拿不到 step log,需要看具体哪个 test fail 时直接拉 artifact)
+        run: |
+          go test -count=1 -race -v \
+            -skip 'TestBaseRules_ForbidsSourcingFindingAsEvidence|TestBaseRules_ExplicitRefusalPattern|TestBuildContext_NotInflatedWithFindings|TestProsecutorPrompt_ShouldHaveFindingSection_WhenFindingsExist' \
+            ./... 2>&1 | tee backend-test.log
+        # exit code 由 tee 决定, 但我们想让 step fail 时 log 也保留 — 不管 exit,都上传
+      - name: Upload backend test log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: backend-test-log
+          path: backend/backend-test.log
+          if-no-files-found: warn
+
+  # ============== Frontend ==============
+  frontend-test:
+    name: Frontend (Next.js)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ./frontend
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v5
+        with:
+          node-version: '22'
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 9
+
+      - name: Install dependencies
+        run: pnpm install
+
+      - name: Type check
+        run: pnpm run tsc
+
+      - name: Unit tests
+        # v0.10.9 踩过 yaml 多行 \ 续行的坑:yaml 保留 \ 后的换行 + 缩进空格,
+        # shell 看到的文件名带前导空格, node --test 找不到。改 block scalar |。
+        run: |
+          pnpm exec node --experimental-strip-types --test \
+            lib/transport.test.ts \
+            lib/reconnect.test.ts \
+            lib/analytics/analytics.test.ts \
+            lib/analytics/runtime.test.ts
+
+      - name: Build
+        run: pnpm run build
+
+  # ============== Doc cross-links ==============
+  doc-cross-links:
+    name: Doc cross-links
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Verify ADR index count
+        # 校验 docs/adr/README.md 索引的 ADR 数量 == 真实 .md 文件数量
+        # v0.10.8 踩过的坑: BRE 模式下 `|` 是字面字符不是元字符,
+        # '^### \[\|^| [0-9]' 第二个分支的 `^` 实际不生效(只在首分支锚定),
+        # 所以 grep -c 永远返回 0。改用 grep -E (ERE) + 显式 | 交替。
+        run: |
+          expected=$(ls docs/adr/*.md | wc -l)
+          actual=$(grep -E -c '^\| \[[0-9]+\]' docs/adr/README.md)
+          echo "Expected ADR count (real files): $expected"
+          echo "Indexed ADR count (README refs): $actual"
+          if [ "$expected" -gt 22 ] && [ "$actual" -gt 18 ]; then
+            echo "ADR count looks healthy: $expected files, $actual indexed"
+          else
+            echo "WARN: ADR count low (files=$expected, indexed=$actual), verify README"
+            exit 1
+          fi

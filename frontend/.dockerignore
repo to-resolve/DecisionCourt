@@ -1,0 +1,13 @@
+# 构建上下文瘦身 + 本地构建修复
+# 1. pnpm-workspace.yaml 只含 pnpm 10 的 allowBuilds 配置,没有 packages 字段;
+#    Dockerfile 锁的 pnpm@9.15.4 见到它就认为"workspace 没有包"直接报错。
+#    本项目是单包应用,容器构建不需要它,排除。
+pnpm-workspace.yaml
+# 2. 本地 node_modules / .next 绝不进镜像(会覆盖 deps stage 装好的 Linux 版依赖)
+node_modules
+.next
+out
+# 3. 杂项
+*.log
+.env*
+.git

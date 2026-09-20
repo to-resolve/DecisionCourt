@@ -1,0 +1,314 @@
+# 决策庭 · 项目文档索引
+
+> 面向**项目内部开发者**（包括后续维护者、协作者、自己 3 个月后回来接手）的文档索引。
+>
+> **外部 GitHub 访客请看仓库根目录的 [`README.md`](../README.md)。**
+>
+> 最后整理：2026-08-20（**v1.0.0 落地** + ECS 30 天沉淀收尾 + DeepSeek v4 迁移 + ADR 0029 + V1-ROADMAP.md 新建）
+
+---
+
+## 1. 阅读路径建议
+
+按下面顺序读，对项目全貌的建立最快：
+
+1. [`decisioncourt-prd.md`](./decisioncourt-prd.md) — 产品定位、MVP 边界、Agent 协作设计
+2. [`decisioncourt-tech-spec.md`](./decisioncourt-tech-spec.md) — 整体技术栈、模块划分、目录结构
+3. [`decisioncourt-agent-design.md`](./decisioncourt-agent-design.md) — 庭审状态机、Agent 协作时序、Prompt 设计
+4. [`decisioncourt-api-design.md`](./decisioncourt-api-design.md) — REST + WebSocket 协议
+5. [`decisioncourt-db-design.md`](./decisioncourt-db-design.md) — 表结构、ER 关系
+6. [`decisioncourt-roadmap.md`](./decisioncourt-roadmap.md) — 已实装 / 待办 / 第二阶段
+
+进阶阅读：
+
+- [`decisioncourt-ux-refinement.md`](./decisioncourt-ux-refinement.md) — UX 决策与视觉细节
+- [`adr/`](./adr/) — 27 份关键架构决策记录（编号 0001-0027，每个决策背后的"为什么"）
+- [`archive/`](./archive/) — 已完成的详细设计文档（完整原文，不删）
+
+---
+
+## 2. 主项目文档清单（8 份）
+
+| # | 文档 | 内容 | 当前版本 |
+|---|---|---|---|
+| 1 | [decisioncourt-prd.md](./decisioncourt-prd.md) | 产品需求 + Agent 角色 + 庭审流程 + 信念引擎 + MVP 边界 | v0.7 |
+| 2 | [decisioncourt-api-design.md](./decisioncourt-api-design.md) | REST + WebSocket 协议 + A2A 事件 + 错误码 + 幂等性 | v0.7 |
+| 3 | [decisioncourt-db-design.md](./decisioncourt-db-design.md) | 表结构 + ER 关系 + 业务流 | v0.6 |
+| 4 | [decisioncourt-tech-spec.md](./decisioncourt-tech-spec.md) | 技术栈 + 目录结构 + Agent Gateway + WebSearch + 高可用规划 | v0.7 |
+| 5 | [decisioncourt-agent-design.md](./decisioncourt-agent-design.md) | 状态机 + Agent 协作时序 + Prompt 模板 + 防止附和 | v0.7 |
+| 6 | [decisioncourt-ux-refinement.md](./decisioncourt-ux-refinement.md) | UX 决策 + 视觉规范 + 已知 bug 清单 | v0.5 |
+| 7 | [decisioncourt-roadmap.md](./decisioncourt-roadmap.md) | 实施阶段 + 里程碑 + 进度快照 | v0.7 |
+| 8 | [project-ideas.md](./project-ideas.md) | 选题说明（简历叙事 + 核心亮点） | v0.3 |
+
+---
+
+## 3. 架构决策记录（ADR）
+
+[`adr/`](./adr/) 收录 27 份关键架构决策（编号 0001-0027），每份 1 个文件。每份 ADR 包含：**背景 / 选项对比 / 决策 / 后果**。
+
+| # | 决策 | 关联代码 |
+|---|---|---|
+| [0001](./adr/0001-mvp-tech-stack.md) | MVP 技术栈（Go + Next.js + PG + Redis + DeepSeek） | `backend/cmd/server/main.go` |
+| [0002](./adr/0002-a2a-private-channel.md) | 私有记忆底层迁移到 A2A 私有通道 | `internal/a2a/`、`internal/private_memory/` |
+| [0003](./adr/0003-contextview-projection.md) | LLM prompt 投影层（BuildContextView） | `internal/a2a/context_view.go` |
+| [0004](./adr/0004-bayesian-belief-engine.md) | v0.6 信念引擎升级（贝叶斯 log-odds + 锚定） | `internal/belief/engine_v06.go` |
+| [0005](./adr/0005-investigation-findings.md) | 调查发现独立表（与用户证据严格分离） | `internal/investigation/`、`investigation_findings` 表 |
+| [0006](./adr/0006-smart-prompt-compression.md) | Agent Gateway v2 Smart Prompt Compression | `internal/agent_gateway/prompt_*` |
+| [0007](./adr/0007-token-budget-rejection.md) | Token Budget 默认 reject-when-exhausted | `internal/agent_gateway/token_budget.go` |
+| [0008](./adr/0008-cross-exam-user-trigger.md) | 质证轮次控制（用户点击触发每轮） | `internal/courtroom/service.go` |
+| [0009](./adr/0009-courtroom-vis-simplify.md) | 庭审页面可视化简化（2026-07 保留 ReactFlow 观点地图） | `frontend/components/courtroom/ArgumentMap.tsx` |
+| [0032](./adr/0032-remove-argument-map.md) | v1.0.3 移除 ArgumentMap（叙事流优先于信息图重） | | 详见 ADR 0032 + commit `<此 commit>` |
+| [0010](./adr/0010-whitebox-observability.md) | v0.8 后端白盒化（slog + Prometheus + OTel-Span + decision_events） | ✅ | `internal/observability/` |
+| [0011](./adr/0011-llm-probability-hard-clamp.md) | v0.8.4 LLM 输出概率值后端硬编码 Clamp（DeepSeek 抽风修复） | ✅ | `internal/agent/probability.go` |
+| [0012](./adr/0012-ha-and-concurrency.md) | v0.9 单机部署 HA 与并发防护（session 互斥 + Idempotency-Key + panic 兜底 + 启动恢复） | ✅ | `internal/courtroom/session_locks.go` + `internal/idempotency/` + `recovery.go` |
+| [0013](./adr/0013-llm-gateway-engineering.md) | v0.9 LLM Gateway 工程化（per-call Timeout + Response Cache + Circuit Breaker） | ✅ | `internal/agent_gateway/{timeout,cache,breaker}.go` |
+| [0014](./adr/0014-user-rate-limit.md) | v0.9 用户级 Trial 限流（滑动窗口） | ✅ | `internal/ratelimit/` + `handler.TrialRateLimiter` |
+| [0015](./adr/0015-evidence-fidelity-no-hallucination.md) | v0.9.1 证据真实性与 LLM 幻觉防御（无 evidence_id 不引用 + 不编造证据） | ✅ | `internal/agent/prompts.go` + `orchestrator.go` |
+| [0016](./adr/0016-deployment-lessons-learned.md) | v0.9.x ~ v0.10 部署踩坑汇总（健康检查时序 + 镜像 tag 策略 + volume 权限） | ✅ | `.github/workflows/` + `docker-compose.yml` |
+| [0017](./adr/0017-websocket-uuid-credential.md) | v0.9.3 WS session_uuid 房间钥匙 bug 修复（拆分 subprotocol token） | ✅ | `internal/api/websocket.go` |
+| [0018](./adr/0018-websocket-origincheck-init-timing.md) | v0.9.3 WS OriginCheck 初始化时序修复（避免启动失败但端口已开） | ✅ | `internal/api/websocket.go` + `cmd/server/main.go` |
+| [0020](./adr/0020-frontend-analytics-via-decision-events.md) | v0.10 前端埋点用 decision_events 后端审计（避免前端独立分析链路） | ✅ | `internal/observability/decision_events.go` + `frontend/lib/analytics.ts` |
+| [0021](./adr/0021-llm-hallucination-output-validator.md) | v0.10 LLM Output 验证（防幻觉正则扫描 + JSON 提取三层防御 + 64KB cap） | ✅ | `internal/agent_gateway/output_validator.go` + `frontend/lib/errorBus.ts` |
+| [0022](./adr/0022-github-actions-ci-cd.md) | v0.10.2 GitHub Actions CI/CD（test.yml + deploy.yml + tag-based deploy） | ✅ | `.github/workflows/` |
+| [0023](./adr/0023-github-actions-ci-pause.md) | v0.10.7~15 CI 暂停与恢复完整复盘（14 版迭代，✅ v0.10.15 端到端跑通） | ✅ | ADR 0023 §5 当前 dev 工作流 |
+| [0024](./adr/0024-silent-error-fix-pr1.md) | v0.10.17 静默错误全局修复 PR 1（后端 UserFacingError 类型 + 4 个静默错误点改造） | ✅ | `backend/internal/courtroom/errors.go` + `statemachine.go` + `service.go` + `api/handler.go` + `api/websocket.go` + `agent/react_runner.go` |
+| [0025](./adr/0025-security-p0-closeout.md) | v0.10.18 安全审计 P0 阶段收尾（JWT_SECRET fail-fast + UID 10001） | ✅ | `backend/internal/config/config.go` + `backend/Dockerfile` + `frontend/Dockerfile` + `docker-compose.yml` |
+| [0026](./adr/0026-viper-bindenv-fix.md) | v0.10.19 viper 1.21.0 BindEnv 显式绑定（修复 AutomaticEnv 自动小写化导致必须 env 找不到） | ✅ | `backend/internal/config/config.go` |
+| [0027](./adr/0027-rate-limit-defense-in-depth.md) | v0.10.20 4 层限流防御深度（L3 Per-IP + L2 Per-User + L1 Per-Session + L0 全局并发信号量） | ✅ | `internal/middleware/session_ratelimit.go` + `internal/courtroom/concurrency.go` |
+| [0028](./adr/0028-env-or-default-helper.md) | envOrDefault helper 全面修复 viper 25+ env lowercase bug（v0.10.21 PR-C） | ✅ | `internal/config/env.go` + `config.go` + 26 sub-test |
+| [0029](./adr/0029-deepseek-v4-migration.md) | **DeepSeek v3→v4 模型硬迁移（v1.0.0 P0-前置）** | ✅ | `internal/config/config.go` + `.env.example` + 8 个 mock test |
+
+### 5.5 v0.8+ 持续可观测性完善计划
+
+按"使用数据驱动"思路分五阶段推进：
+
+| 阶段 | 版本 | 触发条件 | 工作量 |
+|---|---|---|---|
+| **Phase A** 数据采集 | v0.8.1 | 跑 5-10 场真实庭审 | 1-2 周 |
+| **Phase B** 增量埋点 | v0.8.x | Phase A 统计报告 | 2-3 周 |
+| **Phase C** Prometheus | v0.9.0 | 日均 LLM > 100 | 2-3 周 |
+| **Phase D** OTLP / Jaeger | v1.0.0 | 多实例部署 | 3-4 周 |
+| **Phase E** 数据仓库 | v1.x | 商业化启动 | 4-6 周 |
+
+详细计划：[`roadmap/whitebox-roadmap.md`](./roadmap/whitebox-roadmap.md)
+
+---
+
+## 4. 历史归档（[`archive/`](./archive/)）
+
+原 `.trae/documents/` 下的"进行中设计文档"已经全部落地，归档保留完整原文。**这些是历史快照，未来修改代码请以 `docs/` 下主文档和 ADR 为准**。
+
+- `archive/memory-a2a-redesign-v1.2.md` — v0.5 记忆系统 + A2A 重设计完整原文（PR 1-4 已落地，v0.5+ 修补已完成）
+- `archive/todolist1-pr1-contextview.md` — PR 1 ContextView 投影详细 todo 列表
+- `archive/agent-gateway-advanced-plan.md` — Agent Gateway v0.5+ 高级能力实施计划（已落地）
+- `archive/gateway-necessity-evaluation.md` — Agent Gateway 必要性评判（已落地）
+- `archive/庭审可视化简化计划.md` — 庭审页观点地图 + 立场曲线 简化方案
+- `archive/质证阶段轮次控制修改计划.md` — 质证阶段每轮用户触发的详细修改计划
+- `archive/refresh-and-reopen-fix-v0.8.3.md` — v0.8.3 修复"刷新丢数据 + 判决书回退无法继续开庭" 5 个根因 + 修复方案 + 测试矩阵
+- `archive/ecs-end-of-life-2026-08-05.md` — ECS `47.239.152.177` 基础设施终止记录（项目继续个人长期维护）
+- `archive/security-audit-2026-07-03.md` — v0.8.3 OWASP Top 10 安全审计报告（所有 20 项 P0/P1/P2/P3 已修复）
+
+---
+
+## 5. 实装状态矩阵（截至 2026-08-20 v1.0.0）
+
+> **2026-08-20 v1.0.0 更新说明**：v0.10.20（2026-07-12）为最后生产部署版本；2026-08-05 用户决策不续购 ECS；2026-08-20 发布 **v1.0.0**（本地开发模式），完成 ECS 30 天 8 问题收尾 + DeepSeek v4 迁移 + 8 问题专项回归测试护栏。详见 [release-notes/v1.0.0.md](./release-notes/v1.0.0.md) + [V1-ROADMAP.md](./V1-ROADMAP.md)。后续版本（v1.0.x / v1.1+）以 v1.0.0 为 baseline，不再绑定"部署到 ECS"叙事，代码 + 文档继续维护。
+
+> **模块 × 状态 × 代码位置** 速查。**✅ = 已实装**，**⏳ = 计划中**。
+
+### 5.1 后端核心
+
+| 模块 | 状态 | 代码位置 |
+|---|---|---|
+| A2A 消息总线 + 路由 + 可见性隔离 | ✅ | `internal/a2a/bus.go`（12 项测试） |
+| ContextView 投影 + 4 种 private MessageType | ✅ | `internal/a2a/context_view.go`（10 项测试） |
+| 私有记忆池（Repository 接口 + InMemory/GORM） | ✅ | `internal/private_memory/`（9 项测试） |
+| 调查发现独立表 + Service | ✅ | `internal/investigation/`（10 项测试） |
+| ReAct Runner（thought / tool_call / reflect / speak） | ✅ | `internal/agent/react_runner.go` |
+| Orchestrator Prompt 注入（ContextView + private memory） | ✅ | `internal/agent/orchestrator_context.go` |
+| ReAct reflect 自动分类写记忆 | ✅ | `internal/agent/reflect_classifier.go` |
+| 信念引擎（贝叶斯 log-odds + 锚定 + weaken 边） | ✅ | `internal/belief/engine_v06.go` |
+| 信念审计 trail（belief_diffs + GET /belief-diffs） | ✅ | `internal/belief/diff.go`、`internal/model/belief_diff.go` |
+| 智能收敛（推理震荡 > 共识 > 稳定 > 兜底） | ✅ | `internal/belief/convergence.go` |
+| 庭审状态机（idle → opening → cross_exam → closing → verdict） | ✅ | `internal/courtroom/statemachine.go` |
+| 质证轮次用户触发（round.waiting_for_user + continue_cross_exam） | ✅ | `internal/courtroom/service.go` |
+| LLM 流式（StreamComplete + hub.Broadcast sleep 30ms） | ✅ | `internal/llm/client.go`、`internal/api/hub.go` |
+| Agent Gateway 白盒子集（统一接入 + 审计 + trace） | ✅ | `internal/agent_gateway/gateway.go` |
+| Agent Gateway v0.5+ 高级能力（压缩 / 预算 / 限流 / Fallback / 文件日志） | ✅ | `internal/agent_gateway/` |
+| Agent Gateway v2（Smart Compression + Token Budget Reject） | ✅ | `internal/agent_gateway/` |
+| **白盒化 — slog 结构化日志** | ✅ (v0.8) | `internal/observability/logger.go` |
+| **白盒化 — Prometheus-兼容业务指标** | ✅ (v0.8) | `internal/observability/metrics.go`（11 类业务指标 + 4 类系统指标） |
+| **白盒化 — Span + decision_events 业务事件审计** | ✅ (v0.8) | `internal/observability/trace.go` + `internal/model/decision_event.go` |
+| **白盒化 — Trace / Metrics / Recovery Gin middleware** | ✅ (v0.8) | `internal/observability/middleware.go` |
+| **白盒化 — 端到端 trace_id 串联（HTTP → ctx → A2A → LLM）** | ✅ (v0.8) | `TraceMiddleware` + `websocket.go` 改造 + `X-Request-ID` header |
+| **白盒化 — `GET /metrics` 端点** | ✅ (v0.8) | `internal/api/handler.go` `MetricsHandler` |
+| **v0.9 单机部署 — session 互斥补锁**（ADR 0012 PR1） | ✅ (v0.9) | `internal/courtroom/service.go` `sessionLocks` |
+| **v0.9 单机部署 — Idempotency-Key 客户端 + 后端**（ADR 0012 PR2） | ✅ (v0.9) | `internal/idempotency/`（新）+ `frontend/lib/api.ts` |
+| **v0.9 单机部署 — `runCrossExamRound` panic 兜底**（ADR 0012 PR4） | ✅ (v0.9) | `internal/courtroom/service.go` defer recover |
+| **v0.9 单机部署 — 启动扫描恢复 active session**（ADR 0012 PR5） | ✅ (v0.9) | `internal/courtroom/recovery.go`（新） |
+| **v0.9 LLM Gateway — per-call Timeout 90s**（ADR 0013） | ✅ (v0.9) | `internal/agent_gateway/gateway.go` |
+| **v0.9 LLM Gateway — Response Cache（sync.Map + LRU + TTL）**（ADR 0013） | ✅ (v0.9) | `internal/agent_gateway/cache.go` |
+| **v0.9 LLM Gateway — Circuit Breaker（sony/gobreaker）**（ADR 0013） | ✅ (v0.9) | `internal/agent_gateway/breaker.go` |
+| **v0.9 用户级 Trial 限流**（ADR 0014） | ✅ (v0.9) | `internal/ratelimit/`（新）+ `handler.TrialRateLimiter` |
+| **v0.9.1 证据真实性与 LLM 幻觉防御**（ADR 0015） | ✅ (v0.9.1) | `internal/agent/prompts.go` + `orchestrator.go` |
+
+### 5.2 前端核心
+
+| 模块 | 状态 | 代码位置 |
+|---|---|---|
+| 首页 / 立案页 | ✅ | `frontend/app/page.tsx` |
+| 庭审主界面（白底极简 + 凹陷输入框） | ✅ | `frontend/app/court/[id]/page.tsx` |
+| AgentAvatar 头部气泡（调查 > 流式 > 思考 > 发言） | ✅ | `frontend/components/courtroom/AgentAvatar.tsx` |
+| InvestigatorPanel（独立 Tab） | ✅ | `frontend/components/courtroom/InvestigatorPanel.tsx` |
+| MemoryAuditPanel（4 种 kind 配色 + 真实法庭 toggle） | ✅ | `frontend/components/courtroom/MemoryAuditPanel.tsx` |
+| BeliefDiffCard / BeliefTrajectoryTab / ConvergenceBadge | ✅ | `frontend/components/courtroom/Belief*` |
+| ~~观点地图 ArgumentMap（精简版）~~ | ❌ **v1.0.3 移除** | 叙事流已承载立场信息, ReactFlow 信息图重写无增量洞察 |
+| 判决书页 + trial_summary + JSON/PDF 导出 | ✅ | `frontend/app/verdict/[id]/page.tsx` |
+
+### 5.3 第二阶段 / v0.10+ 计划（不在 v0.9 范围）
+
+| 项 | 状态 | 备注 |
+|---|---|---|
+| Agent Gateway 模型路由 | ⏳ | 当前手工选 V3/R1 |
+| Agent Gateway 多实例 Token Budget 持久化 | ⏳ | 现仅内存 |
+| 强制立场一致性检查（LLM-as-judge 打回重生成） | ✅ v0.10.24 候选 1 | 与当前 belief 方向不一致 (老 isStanceConsistent 阈值 0.45/0.55 fast filter) 触发 `applySpeakerStanceJudge` (低温 0.2 judge) + 2 次 retry hint; 失败 fallback StanceRejected=true + StanceJudgeReason; 前端 chip `🛡 stance 违规` |
+| 新意度检查（Jaccard 相似度 > 60% 强制换角度） | ✅ v0.10.23 候选 2 | 与同 agent 历史发言 Jaccard > 0.6 触发 `applySpeakerNoveltyCheck` + 2 次 retry hint; 失败 fallback NoveltyRejected=true; 前端 chip `⚠ 重复度 X%` |
+| 发言长度硬截断（300 字 + 重试） | ✅ v0.10.21 PR-B | 后端 `react_runner.go` applySpeakerLengthLimit 硬截断 + `truncateRunes` (rune 计, 中文友好) + Speaker.ContentTruncated/OriginalRunes 透传前端 chip；prompt 200 → 300 字同步 |
+| "已反驳证据"集合跟踪 | ⏳ | 未实装状态机 |
+| Redis 分布式 WebSocket 广播 | ⏳ | 现单节点 Hub（v0.9 ADR 0012 已决策不引入） |
+| 后端高可用 + 水平扩展 | ⏳ | ADR 0012 决策**单机部署**，架构层面不引入 Redis Pub/Sub |
+| OTel OTLP exporter / Prometheus text exporter | ⏳ | 当前 JSON 格式，未来可切换 |
+| 业务级 span 全量埋点（courtroom service / orchestrator） | ⏳ | 当前仅 state_transition 已埋 |
+| LLM Output 验证（防幻觉正则扫） | ⏳ | ADR 0015 决策暂不做，留待 v1.x |
+| 专家证人 / 陪审团 / 历史庭审 / PDF 导出 | ❌ | 商业化前不启动 |
+
+**v0.10.22 PR-A 收尾（2026-08-06）**：FileLogger 默认启用（`config.go` L157 / compose / `.env.example` 三处一致）+ 3 处文档错位修复（`.jsonl` → `.log` / 35 → 38 字段 / 路径）+ 2 个新测试（`TestFileLogger_BasicWrite` + `TestFileLogger_DirectoryCreate`）。24 天静默教训彻底收尾。详见 [release-notes/v0.10.22.md](./release-notes/v0.10.22.md)。
+
+### 5.4 明确不做（决策日期 2026-07-01）
+
+- ❌ 问题澄清与选项生成（用户只给模糊问题时）
+- ❌ Agent 主动提问（识别信息缺口后向用户提问，回答转为证据）
+- ❌ LLM 调用审计可视化（前端 dashboard）—— 后端 `llm_calls` 表 + JSON 文件日志已够
+- ❌ v0.5 数据迁移 Phase 1-3 —— 开发期数据无保留价值
+
+---
+
+## 6. v0.9.1 部署就绪总览（2026-07-04 同步）
+
+v0.9 全部决策已落地,代码 + 测试 + 文档三向对齐,准备部署到阿里云单 ECS(2C2G + 香港免备案)。
+
+### 6.1 已完成事项（2026-07-04 一日内清空）
+
+| 维度 | 决策/ADR | 关键产出 |
+|---|---|---|
+| **高可用 / 并发** | [ADR 0012](./adr/0012-ha-and-concurrency.md) | 5 子项 PR 全落地:session 互斥补锁 + Idempotency-Key + LLM Timeout(已迁 0013) + panic 兜底 + 启动恢复 |
+| **LLM Gateway** | [ADR 0013](./adr/0013-llm-gateway-engineering.md) | per-call Timeout 90s + Response Cache + Circuit Breaker(sony/gobreaker) |
+| **用户限流** | [ADR 0014](./adr/0014-user-rate-limit.md) | 每用户每天 5 次 StartTrial(sync.Map + 滑动窗口) |
+| **防幻觉** | [ADR 0015](./adr/0015-evidence-fidelity-no-hallucination.md) | baseRules 严禁编造细节 + buildContext source 标签 + user_interrupt 注入 |
+
+### 6.2 部署就绪 checklist（2026-07-04）
+
+- ✅ 后端 15 包测试全过(40+ 新测试,无回归)
+- ✅ 前端 TypeScript 编译通过,Idempotency-Key 注入生效
+- ✅ Dockerfile 多阶段 + aliyun 镜像(国内稳) + 非 root
+- ✅ docker-compose 五服务齐全(postgres/redis/backend/frontend/caddy)
+- ✅ `.env.example` 完整 + v0.9 配置全暴露 + 生产 .env 模板(`deploy/.env.production.template`)
+- ✅ Caddy 反代配置 + 自动 HTTPS Let's Encrypt
+- ✅ 集成测试通过(host curl 验证 /auth/anon + /courtrooms + /metrics)
+- ✅ CORS preflight 允许 Idempotency-Key header
+- ⏸️ **真域名 + DNS 解析**(用户责任)
+- ⏸️ **真 ECS 部署 + Caddy 证书实测**(等域名)
+
+### 6.3 下一轮议题(v0.10+ / Phase A 数据驱动)
+
+按 [`roadmap/whitebox-roadmap.md`](./roadmap/whitebox-roadmap.md) 推进:
+
+- ⏳ **Phase A 数据采集**:跑 5-10 场真实庭审,统计 `decision_events` 报告
+- ⏳ **Phase B 增量埋点**:基于 Phase A 报告补业务级 span(courtroom service / orchestrator)
+- 📦 **Phase C Prometheus exporter + Grafana**(2026-Q4)
+- 📦 **数据库迁移管理**(golang-migrate,触发条件:首次 destructive schema 变更)
+
+### 6.4 第二阶段 / v1.x 待办(不在 v0.10 范围)
+
+- 多实例 backend + Redis Pub/Sub + LLM 异步化 + DB 主从
+- Agent Gateway 模型路由 / 多 provider fail-over
+- 强制立场一致性检查 ✅ v0.10.24 候选 1 / 新意度检查 ✅ v0.10.23 候选 2 / 300 字硬截断 ✅ v0.10.21 / "已反驳证据"集合跟踪
+- LLM Output 正则扫(ADR 0015 暂缓方案)
+- 专家证人 / 陪审团 / 历史庭审 / PDF 导出 / 商业化
+
+### 6.5 议题产物规划
+
+- ✅ v0.9.1 阶段(2026-07-04 完成):4 份新 ADR(0012-0015)+ 9 个 PR 落地 + 部署就绪
+- ✅ **v0.10 阶段(2026-07-12 完成)**:CI/CD 端到端跑通(ADR 0022+0023)+ 前端埋点(ADR 0020)+ 反幻觉加固(ADR 0021)+ 静默错误修复(待 PR 1)+ 安全审计(待 PR 1)
+- 📦 v0.11+ 阶段(2026-Q4):Phase C Prometheus + Grafana + 静默错误 PR 1-7 + 安全审计 P0 修复
+- 📦 v1.0 阶段(2027+):第二阶段商业化前置(可选)
+
+### 6.6 v0.10.17 静默错误全局修复（2026-07-12 收尾）
+
+> **触发**：用户反馈"庭审无反应"（session `09282a8a-...` opening 死锁，9 个静默错误黑洞）
+> **状态**：✅ **已发版**（commit `860294a` + tag `v0.10.17` + ECS 部署）
+> **完整记录**：[ADR 0024](./adr/0024-silent-error-fix-pr1.md) + [release-notes/v0.10.17.md](./release-notes/v0.10.17.md)
+
+#### 7 个 PR 切片
+
+| PR | 范围 | 单测 | Commit |
+|---|---|---|---|
+| **PR 1** | 后端 UFE 类型 (`courtroom/errors.go` + 4 改 + 1 sentinel) | 13 case | `38e81e3` |
+| **PR 2** | 前端 Toast + errorBus (`toastStore` + `errorBus` + `Toast` + layout) | 29 case | `24b0c05` |
+| **PR 3** | CourtroomScene 接入（WS error + 7 catch + recovery 注入）| — | `3596aaf` |
+| **PR 4** | Verdict + auth（双通道反馈 + dynamic import）| — | `dd23089` |
+| **PR 5** | 文档同步（api-design §5.1 / tech-spec §8.3 / prd §4.6.3）| — | `a9f46a6` |
+| **PR 6** | Breaker fallback Banner | **deferred**（需 search 包改造）| — |
+| **PR 7** | 顶层 ErrorBoundary（`app/error.tsx` + `app/global-error.tsx`）| — | `860294a` |
+
+**累计**：42 个新单测全过，0 回归。
+
+#### 修复前后对比（9 个静默黑洞 → Toast/Banner/Modal）
+
+| 场景 | 修复前 | 修复后 |
+|---|---|---|
+| opening 死锁 | 黑屏 | Toast + 3 recovery 按钮 |
+| WS throttle | console.log（dev 才有）| Toast 3s |
+| 状态机拒绝 | console.error 静默 | Toast + 当前阶段提示 |
+| Trial 429 | alert | Toast + retry_after |
+| HTTP 5xx | throw Error 静默 | Toast + retry |
+| Verdict 导出失败 | alert | Toast + 页面级 setState |
+| auth token 失败 | console.error 后空 | Toast + 清 token |
+| client render throw | 白屏 | `app/error.tsx` 友好页 + Toast |
+| root layout throw | app 崩 | `app/global-error.tsx` 极简页 |
+
+#### 4 class 反馈策略（与 ErrorClass 对应）
+
+| Class | 展示 | 自动消失 | 按钮 |
+|---|---|---|---|
+| `user_input` | 右下角 Toast | 3s | 无 |
+| `transient` | 右下角 Toast | 5s | "重试" |
+| `degraded` | 顶部 Banner | 不消失 | 自定义 |
+| `fatal` | 右下角 Toast | **不消失** | 强制 recovery |
+
+#### 部署
+
+- ✅ `git push origin main` → 8 commit (89dae51..860294a)
+- ✅ `git tag -a v0.10.17` + `git push origin v0.10.17`
+- 🟡 GitHub Actions Test + Deploy 并行跑（5-6 分钟）
+- 镜像 tag: `v0.10.17`（per ADR 0022 可追溯 + 一键回滚）
+
+#### 部署后立即行动
+
+- ⏸ **P0-1 JWT 全栈鉴权**（[security-audit-2026-07-03.md](../.trae/documents/security-audit-2026-07-03.md)）—— JWT 库 `golang-jwt/jwt/v5` + 30 天已确定
+- ⏸ **P0-3 容器硬化** —— 非 root UID `10001:10001` 已确定
+- ⏸ **PR 6 search circuit breaker** —— 推迟到下次 sprint
+
+---
+
+## 7. 文档维护规约
+
+- **修改代码 → 同步更新对应文档**（AGENTS.md §1.2 强制）
+- **裁决类逻辑（法官判决 / 证据有效性判定）** —— 先讨论后实现，AGENTS.md §2 强制
+- **新增 ADR** —— 在 `docs/adr/` 递增编号，保持格式统一
+- **归档已完成的设计** —— 移到 `docs/archive/`，主文档只保留"当前态"
+- **README 索引更新** —— 实装状态矩阵每次有模块变更后同步
+
+---
+
+<p align="center"><sub>Built with ⚖️ · 让 AI 像法庭一样帮你把复杂决策看全、看透、看出可执行结论</sub></p>

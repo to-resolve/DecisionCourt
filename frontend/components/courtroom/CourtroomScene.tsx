@@ -1,0 +1,997 @@
+"use client";
+
+import { useEffect, useRef, useState } from "react";
+import { useRouter } from "next/navigation";
+import { useCourtroomStore, applyCourtEvent } from "@/store/courtroomStore";
+import { api } from "@/lib/api";
+import { createCourtWebSocket, type CourtEventHandler } from "@/lib/websocket";
+import { setGlobalWsRef } from "@/lib/wsHolder";
+import { saveMemoryCache, loadMemoryCache } from "@/lib/memoryCache";
+import type {
+  Agent,
+  EvidenceType,
+  MemoryEntry,
+  UserActionRequest,
+} from "@/types";
+import { usePhaseUI } from "@/hooks/usePhaseUI";
+// v0.10.17 silent-error-fix PR 3: 错误反馈接入。
+// 之前 7 个 try/catch 全部 console.error 后静默,用户看不到任何反馈。
+// 改 toastFatal/toastWarning 让用户知道发生了什么 + 怎么恢复。
+import {
+  handleWsError,
+  toastFatal,
+  toastSuccess,
+  toastWarning,
+} from "@/lib/errorBus";
+import { AgentAvatar } from "./AgentAvatar";
+import { EvidenceBoard } from "./EvidenceBoard";
+import { MessageHistory } from "./MessageHistory";
+import { InvestigatorPanel } from "./InvestigatorPanel";
+import { MemoryAuditPanel } from "./MemoryAuditPanel";
+import { ConvergenceBadge } from "./ConvergenceBadge";
+import { BeliefTrajectoryTab } from "./BeliefTrajectoryTab";
+import { PhaseGuide } from "./PhaseGuide";
+import { HelpPopover } from "./HelpPopover";
+// v1.0.4 PR-C2: Trace 可视化 (TrialReplay Dialog)
+import { TrialReplay } from "@/components/trace/TrialReplay";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+// v0.10 前端埋点 (ADR 0020): 见 runtime.ts 注释。模块级单例,
+  // 这里只在 useEffect 里 initAnalytics(sessionId) 绑 sessionUUID。
+import { initAnalytics, getAnalytics } from "@/lib/analytics/runtime";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
+import { Textarea } from "@/components/ui/textarea";
+import { Label } from "@/components/ui/label";
+import {
+  Gavel,
+  Send,
+  Plus,
+  MessagesSquare,
+  Search as SearchIcon,
+  Brain,
+  Activity,
+  History,
+} from "lucide-react";
+
+interface CourtroomSceneProps {
+  sessionId: string;
+}
+
+function getCurrentSpeakerName(
+  agents: Agent[],
+  bubble: { agentId: string; content: string } | null,
+) {
+  if (!bubble) return null;
+  const agent = agents.find((a) => a.agent_uuid === bubble.agentId);
+  return agent?.name ?? "Agent";
+}
+
+export function CourtroomScene({ sessionId }: CourtroomSceneProps) {
+  const router = useRouter();
+  const {
+    session,
+    agents,
+    evidences,
+    messages,
+    pendingUserAction,
+    activeInvestigation,
+    memoryEntries,
+    realCourthouseMode,
+    beliefDiffs,
+    convergenceInfo,
+    setSession,
+    addMessage,
+    setPendingUserAction,
+    setVerdict,
+    toggleRealCourthouseMode,
+  } = useCourtroomStore();
+
+  const [ws, setWs] = useState<ReturnType<typeof createCourtWebSocket> | null>(
+    null,
+  );
+  // v0.10.17 silent-error-fix PR 3: wsRef 跟 ws state 同步,
+  // 让 onRecoveryClick 在 handler 闭包里能拿到最新的 ws 实例(stale closure 修复)。
+  // setWs 是异步,如果只用 ws state,创建时拿到的 ws 在 deps 变化后已过期。
+  const wsRef = useRef<ReturnType<typeof createCourtWebSocket> | null>(null);
+  const [lastSpeakerId, setLastSpeakerId] = useState<string | null>(null);
+  const [currentBubble, setCurrentBubble] = useState<{
+    agentId: string;
+    content: string;
+  } | null>(null);
+
+  const [inputValue, setInputValue] = useState("");
+  const [answer, setAnswer] = useState("");
+  const [startingTrial, setStartingTrial] = useState(false);
+  // v0.9 (ADR 0012 §决策 2): 持有"本 trial start 操作"的 Idempotency-Key。
+  // 失败保留 → 用户点 retry 用同一 key → 后端命中缓存 → 不重复创建 trial。
+  const startTrialIdempKeyRef = useRef<string | null>(null);
+  const [verdictReady, setVerdictReady] = useState(false);
+  const [waitingForNextRound, setWaitingForNextRound] = useState(false);
+  const [nextRound, setNextRound] = useState(2);
+  // v1.0.4 PR-C2: TrialReplay 庭审回放 Dialog 开关
+  const [replayOpen, setReplayOpen] = useState(false);
+  // v0.10 (ADR 0020) fe.phase_entered: 跟踪"上一次进入 phase 的时刻 + 当前 phase",
+  // phase.changed 事件到达时计算 durationMs = now - lastEnteredAt。
+  // useRef 不触发 re-render,避免 phase 变化外引起额外渲染。
+  const lastPhaseEnteredAtRef = useRef<number>(Date.now());
+  const lastPhaseRef = useRef<string>("idle");
+  // 右侧面板 Tab：庭审记录 vs 调查活动 vs 策略笔记 vs 信念轨迹。默认庭审记录。
+  // v0.5 新增"策略笔记" tab，渲染 A2A 私有消息流（详见 memory-a2a-redesign.md §PR 4）。
+  // v0.6 新增"信念轨迹" tab，渲染 belief_diffs 时间线 + 收敛徽章。
+  const [sidebarTab, setSidebarTab] = useState<
+    "messages" | "investigator" | "memory" | "belief"
+  >("messages");
+
+  // v1.0-patch (2026-08-22): hydrate 移到 app/court/[id]/page.tsx 共享
+  // hydrateCourtroomStore()。本 useEffect 只做 4 件事:
+  //   1. initAnalytics (绑定 sessionUUID 到埋点单例)
+  //   2. memory 降级到 localStorage 缓存 (D2-Memory 收尾,失败时 toast)
+  //   3. WebSocket 连接
+  //   4. TrialReplay Dialog 开关
+  //
+  // 之前这里有 6 段重复的 REST hydrate (session/agents/evidences/investigations/
+  // belief_diffs/memory), 与外层 hydrateCourtroomStore 双跑,
+  // 导致 evidences 数组里同 evidence_id 出现 2 次 → React key 重复警告。
+  // 修复: 删除本 useEffect 内的 REST hydrate, 改用 shared 函数。
+  useEffect(() => {
+    // v0.10 (ADR 0020):绑 sessionUUID 到 analytics 单例。
+    initAnalytics(sessionId);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sessionId]);
+
+  // 保留 D2-Memory 降级逻辑 (失败时从 localStorage 恢复 memory)
+  // — 独立 useEffect, 不依赖 store.evidences 等其他 store 字段
+  useEffect(() => {
+    let mounted = true;
+    async function loadMemory() {
+      try {
+        const memRes = await api.getVisibleMemory(sessionId);
+        if (!mounted) return;
+        if (memRes.code === 0 && Array.isArray(memRes.data.memory)) {
+          for (const row of memRes.data.memory) {
+            applyCourtEvent({
+              type: "a2a.message",
+              payload: row,
+              timestamp: row.created_at || new Date().toISOString(),
+            });
+          }
+          const memory = useCourtroomStore.getState().memoryEntries;
+          saveMemoryCache(sessionId, memory);
+        }
+      } catch (err) {
+        // 降级到 localStorage 缓存 (D2-Memory 收尾, 与外层 hydrate 解耦)
+        const cached = loadMemoryCache(sessionId);
+        if (cached) {
+          for (const entry of cached.entries) {
+            applyCourtEvent({
+              type: "a2a.message",
+              payload: entryToA2aPayload(entry),
+              timestamp: entry.createdAt,
+            });
+          }
+          toastWarning(
+            `Memory 服务异常, 已降级到本地缓存 (${cached.entries.length} 条, 来自 ${cached.savedAt.slice(0, 16)})`,
+            "MEMORY_DEGRADED",
+          );
+        } else {
+          console.warn("[Courtroom] failed to load memory (no cache fallback):", err);
+        }
+      }
+    }
+    void loadMemory();
+    return () => {
+      mounted = false;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sessionId]);
+
+  // v1.0-patch: 删除老的 load() 重复 hydrate 块 (session/agents/evidences/
+  // investigations/belief_diffs/memory 都移到外层 hydrateCourtroomStore + 
+  // 上方独立 memory useEffect)。本 useEffect 只做 WS + TrialReplay。
+
+  // WebSocket 连接 (原 useEffect 残留, 移出 try/catch 包裹)
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  useEffect(() => {
+    const socket = createCourtWebSocket(sessionId, {
+      // v0.10.17 silent-error-fix PR 3: WS 连接状态变化 → toast 反馈。
+      // 之前只在 console.log 打印,用户看不到。
+      // - "reconnecting" → BANNER_"网络中断,正在重连" (持续显示)
+      // - "connected"    → BANNER 升级 → success toast "已恢复"
+      // - "closed"       → fatal toast "连接已断开"
+      onConnectionStateChange: (state) => {
+        if (state === "reconnecting") {
+          toastWarning("网络中断,正在重连...", "WS_RECONNECTING");
+        } else if (state === "connected") {
+          toastSuccess("已恢复连接", "WS_CONNECTED");
+        } else if (state === "closed") {
+          toastFatal("连接已断开,请刷新页面", {
+            code: "WS_CLOSED",
+          });
+        }
+      },
+      // 重连尝试日志:之前只在 console.log,现在打 fe.ws_reconnect 事件
+      // (analytics 自动 flush,因为是 CRITICAL 事件)
+      onReconnectAttempt: (attempt, delayMs) => {
+        getAnalytics().track("fe.ws_reconnect", {
+          attempt,
+          delay_ms: delayMs,
+        });
+      },
+    });
+    setWs(socket);
+    wsRef.current = socket;
+    // D2-L2: 把 ws 注册到 module-level wsHolder, 让 store 调
+    // globalWsRef()?.send({action: ...}) 触发现有 ws (BANNER_ retry 按钮)。
+    setGlobalWsRef(socket);
+
+    const handler: CourtEventHandler = (event) => {
+      // v0.10.17 silent-error-fix PR 3: 后端 BroadcastUserFacingError
+      // 投递的事件 type === "error",payload 是 UserFacingError。
+      // 之前这里没 case,事件被 applyCourtEvent 当作未知事件丢弃,
+      // 用户只看到 console.log 缺失。
+      //
+      // onRecoveryClick 注入:用户点 toast 上的 recovery 按钮时,
+      // 把后端 action 包装成 UserActionRequest 通过 WS 发回。
+      // 例: opening.finished 重试 → ws.send({action: "restart_opening"})
+      if (event.type === "error") {
+        handleWsError(event.payload, {
+          onRecoveryClick: (r: { action?: string }) => {
+            // r.action 可能是 "restart_opening" / "force_skip_opening" 等
+            // 扩展后端新增的 action,需要 cast (UserActionRequest.action 是受限联合类型)
+            if (r.action && wsRef.current) {
+              wsRef.current.send({ action: r.action as UserActionRequest["action"] });
+            }
+          },
+        });
+        return; // 错误事件不往下走 store apply
+      }
+
+      applyCourtEvent(event);
+
+      // Phase transition (e.g. continue_cross_exam → cross_exam round N+1)
+      // implies a new round has begun — clear the "waiting" UI state.
+      if (event.type === "phase.changed") {
+        // v0.10 (ADR 0020) fe.phase_entered:埋"上一阶段停留时长"。
+        // 这是用户行为漏斗最关键的维度——只在 phase.changed 触发,
+        // 不在 phase 静止时重复触发。
+        const payload = event.payload as { phase?: string };
+        if (payload?.phase) {
+          const now = Date.now();
+          getAnalytics().trackPhaseChange(
+            lastPhaseRef.current,
+            payload.phase,
+            now - lastPhaseEnteredAtRef.current,
+          );
+          lastPhaseRef.current = payload.phase;
+          lastPhaseEnteredAtRef.current = now;
+        }
+        setWaitingForNextRound(false);
+      }
+
+      if (event.type === "agent.speak") {
+        const payload = event.payload as {
+          agent_id: string;
+          content: string;
+        };
+        setLastSpeakerId(payload.agent_id);
+        setCurrentBubble({
+          agentId: payload.agent_id,
+          content: payload.content,
+        });
+        setTimeout(() => {
+          setLastSpeakerId(null);
+          setCurrentBubble(null);
+        }, 5000);
+      }
+
+      if (event.type === "judge.belief_update") {
+        const payload = event.payload as {
+          agent_uuid: string;
+          belief_a: number;
+          belief_b: number;
+          reasoning: string;
+        };
+        // Update judge agent in store - use getState() to get current agents
+        const currentAgents = useCourtroomStore.getState().agents;
+        const updatedAgents = currentAgents.map((a) =>
+          a.agent_uuid === payload.agent_uuid
+            ? { ...a, belief_a: payload.belief_a, belief_b: payload.belief_b }
+            : a,
+        );
+        useCourtroomStore.getState().setAgents(updatedAgents);
+      }
+
+      if (event.type === "clerk.round_summary") {
+        const payload = event.payload as {
+          round: number;
+          summary: string;
+          agent_uuid: string;
+        };
+        // Display clerk summary as a system message
+        addMessage({
+          id: `clerk-summary-${Date.now()}`,
+          agent_id: payload.agent_uuid,
+          phase: session?.current_phase ?? "cross_exam",
+          round: payload.round,
+          content: `【书记员总结】${payload.summary}`,
+          evidence_refs: [],
+          action_type: "system",
+          created_at: new Date().toISOString(),
+        });
+      }
+
+      if (event.type === "verdict.ready") {
+        setVerdictReady(true);
+      }
+
+      if (event.type === "round.waiting_for_user") {
+        const p = event.payload as {
+          current_round: number;
+          next_round: number;
+          max_rounds: number;
+        };
+        setWaitingForNextRound(true);
+        setNextRound(p.next_round);
+      }
+
+      if (event.type === "opening.finished") {
+        // Opening finished, wait for user to start cross_exam
+        setWaitingForNextRound(true);
+        setNextRound(1);
+      }
+    };
+
+    socket.on("*", handler);
+
+    return () => {
+      socket.off("*", handler);
+      socket.disconnect();
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sessionId]);
+
+  const sendAction = (action: UserActionRequest) => {
+    ws?.send(action);
+  };
+
+  // v0.10 (ADR 0020) fe.tab_switched:看用户对哪些观测面板感兴趣。
+  // 抽成一个 helper:空操作不埋,避免 React StrictMode 双调用产生重复事件。
+  const handleTabChange = (nextTab: typeof sidebarTab) => {
+    if (nextTab === sidebarTab) return;
+    getAnalytics().track("fe.tab_switched", {
+      from_tab: sidebarTab,
+      to_tab: nextTab,
+    });
+    setSidebarTab(nextTab);
+  };
+
+  const handleSendInput = () => {
+    if (!inputValue.trim()) return;
+    const content = inputValue.trim();
+    sendAction({
+      action: "submit_evidence",
+      content,
+      type: "fact",
+    });
+    // v0.10 (ADR 0020) fe.evidence_submitted:用户参与度指标。
+    // payload 不含 content (PII 守卫会拒绝),只含 char_count。
+    getAnalytics().trackEvidenceSubmitted("fact", content.length);
+    setInputValue("");
+  };
+
+  const handleSubmitEvidence = (content: string, type: EvidenceType) => {
+    sendAction({ action: "submit_evidence", content, type });
+    // v0.10 (ADR 0020) fe.evidence_submitted:同上,只记录类型 + 字符数。
+    getAnalytics().trackEvidenceSubmitted(type, content.length);
+  };
+
+  const handleAnswerQuestion = () => {
+    if (!pendingUserAction) return;
+    sendAction({
+      action: "answer_question",
+      question_id: pendingUserAction.question_id,
+      answer,
+    });
+    setAnswer("");
+    setPendingUserAction(null);
+  };
+
+  const handleSkipQuestion = () => {
+    sendAction({ action: "skip_agent" });
+    setPendingUserAction(null);
+  };
+
+  // v0.10 (ADR 0020) fe.toggle_real_courthouse:看用户对"白盒化 AI 视图"
+  // 的偏好。"真实法庭"模式会隐藏律师内心戏,UI-only filter。
+  const handleToggleRealCourthouse = () => {
+    getAnalytics().track("fe.toggle_real_courthouse", {
+      enabled: !realCourthouseMode,
+    });
+    toggleRealCourthouseMode();
+  };
+
+  const handleViewVerdict = async () => {
+    if (!verdictReady) return;
+    const res = await api.getVerdict(sessionId);
+    if (res.code === 0) {
+      setVerdict(res.data);
+      router.push(`/verdict/${sessionId}`);
+    }
+  };
+
+  const prosecutor = agents.find((a) => a.agent_type === "prosecutor");
+  const defender = agents.find((a) => a.agent_type === "defender");
+  const investigator = agents.find((a) => a.agent_type === "investigator");
+  const clerk = agents.find((a) => a.agent_type === "clerk");
+  const judge = agents.find((a) => a.agent_type === "judge");
+
+  const currentSpeakerName = getCurrentSpeakerName(agents, currentBubble);
+
+  // 单一数据源：所有阶段相关的 UI 文案
+  const phaseUI = usePhaseUI({
+    phase: session?.current_phase ?? "idle",
+    round: session?.current_round ?? 0,
+    verdictReady,
+    waitingForNextRound,
+    nextRound,
+    isAnyAgentSpeaking: !!currentSpeakerName,
+    currentSpeakerName,
+  });
+
+  if (!session) {
+    return (
+      <div className="min-h-screen bg-white text-slate-800 flex items-center justify-center">
+        <p className="text-slate-400">正在加载庭审…</p>
+      </div>
+    );
+  }
+
+  return (
+    <div className="h-screen bg-paper text-ink flex flex-col overflow-hidden">
+      {/* Header — 案卷封面 */}
+      <header className="border-b border-rule bg-paperDeep sticky top-0 z-10">
+        <div className="container mx-auto max-w-6xl px-6 py-4 flex items-center justify-between">
+          <div className="flex items-baseline gap-4">
+            {/* 案卷章 */}
+            <span className="seal-stamp w-10 h-10 text-base leading-none flex items-center justify-center">
+              判
+            </span>
+            <div>
+              <h1 className="text-display text-xl font-semibold text-ink leading-tight">
+                {session.title}
+              </h1>
+              <div className="flex items-baseline gap-3 mt-0.5">
+                <span className="text-display text-sm text-prosecution-ink font-medium">
+                  {session.option_a}
+                </span>
+                <span className="text-[10px] uppercase tracking-[0.2em] text-inkFaint font-data">
+                  vs
+                </span>
+                <span className="text-display text-sm text-defense-ink font-medium">
+                  {session.option_b}
+                </span>
+                <span className="text-[10px] uppercase tracking-[0.2em] text-inkFaint font-data ml-2">
+                  · {phaseUI.phaseLabel}
+                  {phaseUI.roundLabel && ` · ${phaseUI.roundLabel}`}
+                </span>
+              </div>
+            </div>
+          </div>
+          <div className="flex items-center gap-2">
+            {convergenceInfo && <ConvergenceBadge info={convergenceInfo} />}
+            {/* v1.0.4 PR-C2: 庭审回放入口 */}
+            <Button
+              size="sm"
+              variant="outline"
+              onClick={() => setReplayOpen(true)}
+              data-testid="trial-replay-button"
+            >
+              <History className="w-3.5 h-3.5 mr-1.5" />
+              庭审回放
+            </Button>
+            <HelpPopover />
+            {/*
+              v0.8.3 按钮逻辑修正：派生判断改用 session.current_phase
+              （DB 真值），而不是 verdictReady 这个只在 WS 实时推送时
+              才会被设置的本地 boolean —— 后者在 verdict 阶段刷新后会
+              一直是 false，导致用户看到错误的"直接判决"按钮。
+
+              phase 派生：
+                - "idle"                      → 开 庭
+                - "verdict" / "appeal"        → 查看判决書
+                - 其余（opening..deliberation）→ 直接判决
+
+              verdictReady 这个本地 boolean 仍然保留，只用来驱动 amber
+              banner 的入场动画和自动跳转行为（避免用户错过判决到达）。
+            */}
+            {session.current_phase === "idle" ? (
+              <Button
+                size="sm"
+                disabled={startingTrial}
+                onClick={async () => {
+                  // v0.9 (ADR 0012 §决策 2): 用 ref 持有"本 trial start 操作"
+                  // 的 Idempotency-Key。失败保留(用户点 retry 用同 key),
+                  // 成功清掉(下次启动 trial 用新 key)。防弱网重发。
+                  if (!startTrialIdempKeyRef.current) {
+                    startTrialIdempKeyRef.current = crypto.randomUUID();
+                  }
+                  const idempKey = startTrialIdempKeyRef.current;
+
+                  // v0.10 (ADR 0020) fe.trial_started:漏斗入口。
+                  // 后端无对应动作,纯前端用户行为埋点。
+                  getAnalytics().track("fe.trial_started", {
+                    phase: session?.current_phase ?? "idle",
+                  });
+
+                  setStartingTrial(true);
+                  try {
+                    const res = await api.startTrial(sessionId, idempKey);
+                    if (res.code === 0) {
+                      startTrialIdempKeyRef.current = null; // 成功清掉
+                      const updated = await api.getSession(sessionId);
+                      if (updated.code === 0) setSession(updated.data);
+                    } else {
+                      // v0.10.17 silent-error-fix PR 3: alert() → toastFatal。
+                      // 之前用 window.alert(),阻塞 + 样式丑 + 用户体验差。
+                      // handleApiError 已经在 fetchJson 里 toast 了 429 / 5xx,
+                      // 这里只处理 res.code !== 0 的业务级错误(后端 200 但 logic 失败)。
+                      const msg = (res as unknown as { message?: string }).message ?? "未知错误";
+                      toastFatal("启动庭审失败：" + msg, {
+                        code: "START_TRIAL_FAILED",
+                      });
+                    }
+                  } catch (err) {
+                    // v0.10.17 silent-error-fix PR 3: alert() → toastFatal。
+                    // handleApiError 已经在 fetchJson 里 toast,这里仅 console.debug。
+                    // 保留 idempKey,用户点 retry 用同 key。
+                    console.debug("[Courtroom] start trial failed (toast already shown):", err);
+                  } finally {
+                    setStartingTrial(false);
+                  }
+                }}
+                className="bg-ink text-paper hover:bg-inkSoft rounded-sm px-4 h-9 font-data tracking-wider"
+              >
+                <Gavel className="w-3.5 h-3.5 mr-1.5" />
+                {startingTrial ? "启动中…" : "开 庭"}
+              </Button>
+            ) : session.current_phase === "verdict" ||
+              session.current_phase === "appeal" ? (
+              <Button
+                size="sm"
+                onClick={handleViewVerdict}
+                className="bg-seal text-paper hover:bg-seal-ink rounded-sm px-4 h-9 font-data tracking-wider"
+              >
+                <Gavel className="w-3.5 h-3.5 mr-1.5" />
+                查 看 判 决 書
+              </Button>
+            ) : (
+              <Button
+                size="sm"
+                onClick={() => {
+                  // v0.10 (ADR 0020) fe.direct_verdict_triggered:
+                  // 用户主动跳过 = 不耐烦/对当前 phase 质量不满的反向信号。
+                  getAnalytics().track("fe.direct_verdict_triggered", {
+                    current_round: session?.current_round ?? 0,
+                    current_phase: session?.current_phase ?? "unknown",
+                  });
+                  sendAction({ action: "direct_verdict" });
+                }}
+                className="bg-ink text-paper hover:bg-inkSoft rounded-sm px-4 h-9 font-data tracking-wider"
+              >
+                <Gavel className="w-3.5 h-3.5 mr-1.5" />
+                直 接 判 决
+              </Button>
+            )}
+          </div>
+        </div>
+      </header>
+
+      {/* Phase guide */}
+      {phaseUI.showGuide && (
+        <PhaseGuide text={phaseUI.guideText} tone={phaseUI.guideTone} />
+      )}
+
+      {/* Verdict ready banner */}
+      {verdictReady && (
+        <div className="bg-amber-50 border-y border-rule px-6 py-3">
+          <div className="container mx-auto max-w-6xl flex items-center justify-between">
+            <p className="text-display text-sm text-judge-ink">
+              <span className="seal-stamp w-5 h-5 text-[10px] mr-2 inline-flex items-center justify-center align-middle">判</span>
+              判决书已落印归档 · 点击下方按钮查阅最终结论
+            </p>
+            <Button
+              size="sm"
+              onClick={handleViewVerdict}
+              className="bg-seal text-paper hover:bg-seal-ink rounded-sm px-4 h-9 font-data tracking-wider"
+            >
+              <Gavel className="w-3.5 h-3.5 mr-1.5" />
+              查 看 判 决 書
+            </Button>
+          </div>
+        </div>
+      )}
+
+      {/* Main content */}
+      <div className="flex-1 container mx-auto max-w-6xl px-6 py-5 flex gap-5 overflow-hidden">
+        {/* Courtroom scene */}
+        <div className="flex-1 flex flex-col gap-5 min-w-0 overflow-y-auto">
+          {/* Agent arena — 庭审中央 */}
+          <div className="relative flex flex-col items-center justify-start py-5 bg-white border border-rule rounded-sm shadow-paper">
+            {/* 案卷标题 */}
+            <div className="absolute top-3 left-4 phase-ribbon z-10">
+              庭审现场
+            </div>
+
+            {/* Speaker hint */}
+            <div className="absolute top-3 right-4 text-[11px] font-data tracking-wider text-inkSoft uppercase">
+              {currentSpeakerName ? (
+                <span className="flex items-center gap-1.5 text-prosecution-ink">
+                  <span className="w-1.5 h-1.5 rounded-full bg-seal" />
+                  {currentSpeakerName} 正在陈述
+                </span>
+              ) : (
+                phaseUI.speakerHint
+              )}
+            </div>
+
+            {/* 当事人对照行（最醒目） */}
+            <div className="w-full max-w-3xl px-4 mt-9 mb-1">
+              <div className="flex items-center justify-center gap-6">
+                <div className="flex-1 text-right">
+                  <div className="text-[10px] uppercase tracking-[0.25em] text-prosecution-ink font-data mb-0.5">
+                    控方主张
+                  </div>
+                  <div className="text-display text-lg font-semibold text-ink leading-tight">
+                    {session.option_a}
+                  </div>
+                </div>
+                <div className="text-display text-inkFaint text-2xl font-light px-3">
+                  ⚖
+                </div>
+                <div className="flex-1 text-left">
+                  <div className="text-[10px] uppercase tracking-[0.25em] text-defense-ink font-data mb-0.5">
+                    辩方主张
+                  </div>
+                  <div className="text-display text-lg font-semibold text-ink leading-tight">
+                    {session.option_b}
+                  </div>
+                </div>
+              </div>
+              {/* 细线分隔 */}
+              <div className="border-t border-rule mt-2" />
+            </div>
+
+            <div className="w-full max-w-3xl flex flex-col items-center gap-3 px-4 pb-1">
+              {/* Top center: judge */}
+              {judge && (
+                <AgentAvatar
+                  agent={judge}
+                  isSpeaking={lastSpeakerId === judge.agent_uuid}
+                  bubble={
+                    currentBubble?.agentId === judge.agent_uuid
+                      ? currentBubble.content
+                      : null
+                  }
+                  showMeter={true}
+                  optionA={session.option_a}
+                  optionB={session.option_b}
+                />
+              )}
+
+              {/* Middle row: prosecutor - investigator/clerk - defender */}
+              <div className="w-full grid grid-cols-3 items-start gap-4">
+                {/* Left: prosecutor */}
+                <div className="flex justify-center">
+                  {prosecutor ? (
+                    <AgentAvatar
+                      agent={prosecutor}
+                      isSpeaking={lastSpeakerId === prosecutor.agent_uuid}
+                      bubble={
+                        currentBubble?.agentId === prosecutor.agent_uuid
+                          ? currentBubble.content
+                          : null
+                      }
+                      optionA={session.option_a}
+                    />
+                  ) : null}
+                </div>
+
+                {/* Center: investigator + clerk (stacked) */}
+                <div className="flex flex-col items-center justify-center gap-6">
+                  {investigator ? (
+                    <AgentAvatar
+                      agent={investigator}
+                      isSpeaking={lastSpeakerId === investigator.agent_uuid}
+                      bubble={
+                        currentBubble?.agentId === investigator.agent_uuid
+                          ? currentBubble.content
+                          : null
+                      }
+                      isSearching={!!activeInvestigation}
+                      searchQuery={activeInvestigation?.query}
+                    />
+                  ) : null}
+                  {clerk ? (
+                    <AgentAvatar
+                      agent={clerk}
+                      isSpeaking={lastSpeakerId === clerk.agent_uuid}
+                      bubble={
+                        currentBubble?.agentId === clerk.agent_uuid
+                          ? currentBubble.content
+                          : null
+                      }
+                    />
+                  ) : null}
+                </div>
+
+                {/* Right: defender */}
+                <div className="flex justify-center">
+                  {defender ? (
+                    <AgentAvatar
+                      agent={defender}
+                      isSpeaking={lastSpeakerId === defender.agent_uuid}
+                      bubble={
+                        currentBubble?.agentId === defender.agent_uuid
+                          ? currentBubble.content
+                          : null
+                      }
+                      optionB={session.option_b}
+                    />
+                  ) : null}
+                </div>
+              </div>
+            </div>
+
+            {agents.length === 0 && (
+              <p className="text-slate-400 text-sm mt-4">未加载到 Agent 数据</p>
+            )}
+          </div>
+
+          {/* Evidence board */}
+          <EvidenceBoard
+            evidences={evidences}
+            onSubmit={handleSubmitEvidence}
+            sessionId={sessionId}
+          />
+        </div>
+
+        {/* Message history sidebar */}
+        <div className="w-80 hidden lg:flex border border-rule rounded-sm overflow-hidden h-full flex-col bg-white shadow-paper">
+          {/* 右侧面板 Tab 切换：庭审记录 / 调查活动 / 策略笔记（v0.5 新增） */}
+          <div role="tablist" className="flex border-b border-rule bg-paperDeep">
+            <button
+              role="tab"
+              aria-selected={sidebarTab === "messages"}
+              onClick={() => handleTabChange("messages")}
+              className={`flex-1 px-3 py-2 text-[11px] font-data tracking-[0.15em] uppercase flex items-center justify-center gap-1.5 border-b-2 ${
+                sidebarTab === "messages"
+                  ? "border-seal text-ink"
+                  : "border-transparent text-inkFaint hover:text-ink"
+              }`}
+              data-sidebar-tab="messages"
+            >
+              <MessagesSquare className="w-3.5 h-3.5" />
+              庭审记录
+            </button>
+            <button
+              role="tab"
+              aria-selected={sidebarTab === "investigator"}
+              onClick={() => handleTabChange("investigator")}
+              className={`flex-1 px-3 py-2 text-[11px] font-data tracking-[0.15em] uppercase flex items-center justify-center gap-1.5 border-b-2 ${
+                sidebarTab === "investigator"
+                  ? "border-seal text-ink"
+                  : "border-transparent text-inkFaint hover:text-ink"
+              }`}
+              data-sidebar-tab="investigator"
+            >
+              <SearchIcon className="w-3.5 h-3.5" />
+              调查活动
+            </button>
+            <button
+              role="tab"
+              aria-selected={sidebarTab === "memory"}
+              onClick={() => handleTabChange("memory")}
+              className={`flex-1 px-3 py-2 text-[11px] font-data tracking-[0.15em] uppercase flex items-center justify-center gap-1.5 border-b-2 ${
+                sidebarTab === "memory"
+                  ? "border-seal text-ink"
+                  : "border-transparent text-inkFaint hover:text-ink"
+              }`}
+              data-sidebar-tab="memory"
+              data-testid="memory-tab-button"
+            >
+              <Brain className="w-3.5 h-3.5" />
+              策略笔记
+              {memoryEntries.length > 0 && (
+                <span className="ml-0.5 px-1 rounded-sm bg-paper text-inkFaint text-[9px] font-data tracking-normal">
+                  {memoryEntries.length}
+                </span>
+              )}
+            </button>
+            <button
+              role="tab"
+              aria-selected={sidebarTab === "belief"}
+              onClick={() => handleTabChange("belief")}
+              className={`flex-1 px-3 py-2 text-[11px] font-data tracking-[0.15em] uppercase flex items-center justify-center gap-1.5 border-b-2 ${
+                sidebarTab === "belief"
+                  ? "border-seal text-ink"
+                  : "border-transparent text-inkFaint hover:text-ink"
+              }`}
+              data-sidebar-tab="belief"
+              data-testid="belief-tab-button"
+            >
+              <Activity className="w-3.5 h-3.5" />
+              信念轨迹
+              {beliefDiffs.length > 0 && (
+                <span className="ml-0.5 px-1 rounded-sm bg-paper text-inkFaint text-[9px] font-data tracking-normal">
+                  {beliefDiffs.length}
+                </span>
+              )}
+            </button>
+          </div>
+          <div className="flex-1 min-h-0 overflow-y-auto">
+            {sidebarTab === "messages" ? (
+              <MessageHistory messages={messages} />
+            ) : sidebarTab === "investigator" ? (
+              <InvestigatorPanel />
+            ) : sidebarTab === "memory" ? (
+              <MemoryAuditPanel
+                entries={memoryEntries}
+                redactedMode={realCourthouseMode}
+                onToggleRedacted={handleToggleRealCourthouse}
+              />
+            ) : (
+              <BeliefTrajectoryTab
+                diffs={beliefDiffs}
+                convergenceInfo={convergenceInfo}
+              />
+            )}
+          </div>
+        </div>
+      </div>
+
+      {/* Bottom input bar */}
+      <div className="border-t border-rule bg-paperDeep px-6 py-4">
+        <div className="container mx-auto max-w-6xl">
+          <div className="flex items-center gap-2">
+            <div className="flex items-center gap-2">
+              <Button
+                size="sm"
+                variant="outline"
+                onClick={() => {
+                  const el = document.querySelector(
+                    "[data-evidence-toggle]",
+                  ) as HTMLButtonElement | null;
+                  el?.click();
+                }}
+                className="h-10 rounded-sm border-rule text-ink hover:bg-paper hover:border-inkSoft px-3 font-data tracking-wider text-xs"
+              >
+                <Plus className="w-3.5 h-3.5 mr-1" />
+                归 档 证 据
+              </Button>
+              {waitingForNextRound && (
+                <Button
+                  size="sm"
+                  onClick={() => {
+                    setWaitingForNextRound(false);
+                    if (session.current_phase === "opening") {
+                      sendAction({ action: "start_cross_exam" });
+                    } else {
+                      sendAction({ action: "continue_cross_exam" });
+                    }
+                  }}
+                  className="h-10 rounded-sm bg-seal text-paper hover:bg-seal-ink px-4 font-data tracking-wider text-xs"
+                >
+                  <Gavel className="w-3.5 h-3.5 mr-1.5" />
+                  {session.current_phase === "opening"
+                    ? "开 始 质 证"
+                    : `进 入 第 ${nextRound} 轮`}
+                </Button>
+              )}
+            </div>
+
+            <div className="flex-1 relative">
+              <Input
+                value={inputValue}
+                onChange={(e) => setInputValue(e.target.value)}
+                placeholder={phaseUI.placeholder}
+                disabled={phaseUI.inputDisabled}
+                className="inset-input h-10 pr-12 text-sm font-body"
+                onKeyDown={(e) => e.key === "Enter" && handleSendInput()}
+              />
+              <Button
+                size="icon"
+                onClick={handleSendInput}
+                disabled={phaseUI.inputDisabled}
+                className="absolute right-1 top-1/2 -translate-y-1/2 h-8 w-8 rounded-sm bg-ink hover:bg-inkSoft text-paper"
+              >
+                <Send className="w-3.5 h-3.5" />
+              </Button>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      {/* User action dialog */}
+      <Dialog
+        open={!!pendingUserAction}
+        onOpenChange={() => setPendingUserAction(null)}
+      >
+        <DialogContent className="bg-white border-slate-200 text-slate-800">
+          <DialogHeader>
+            <DialogTitle className="text-slate-900">调查员提问</DialogTitle>
+            <DialogDescription className="text-slate-500">
+              {pendingUserAction?.purpose}
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-4 pt-4">
+            <p className="text-slate-800">{pendingUserAction?.question}</p>
+            <div className="space-y-2">
+              <Label className="text-slate-600">你的回答</Label>
+              <Textarea
+                value={answer}
+                onChange={(e) => setAnswer(e.target.value)}
+                placeholder="请输入你的回答…"
+                className="inset-input min-h-[80px] resize-none"
+              />
+            </div>
+            <div className="flex gap-2 justify-end">
+              {pendingUserAction?.skip_allowed && (
+                <Button
+                  variant="outline"
+                  onClick={handleSkipQuestion}
+                  className="border-slate-200 text-slate-600 rounded-xl"
+                >
+                  跳过
+                </Button>
+              )}
+              <Button
+                onClick={handleAnswerQuestion}
+                className="bg-slate-900 hover:bg-slate-800 text-white rounded-xl"
+              >
+                提交回答
+              </Button>
+            </div>
+          </div>
+        </DialogContent>
+      </Dialog>
+
+      {/* v1.0.4 PR-C2: 庭审回放 Dialog (放在主 Dialog 后,独立顶层,open 状态由 replayOpen 控制) */}
+      <TrialReplay
+        sessionUUID={sessionId}
+        open={replayOpen}
+        onOpenChange={setReplayOpen}
+      />
+    </div>
+  );
+}
+
+// D2-Memory (v0.10.x D2 silent-error-fix 收尾): 把 localStorage 缓存的
+// MemoryEntry 反向映射成 a2a.message payload, 走 applyCourtEvent 同样的
+// 解析路径, 让 store 重新 hydrate memoryEntries。
+// 字段对齐 store/courtroomStore.ts L748-758 期望的 a2a.message payload 形状。
+function entryToA2aPayload(entry: MemoryEntry) {
+  return {
+    id: entry.id,
+    message_uuid: entry.id,
+    round: entry.round,
+    phase: entry.phase,
+    from: entry.agentType,
+    to: "all",
+    message_type: entry.kind,
+    visibility: "private",
+    payload: {
+      content: entry.content,
+      linked_evidence_ids: entry.linkedEvidenceIds,
+      stance: entry.stance,
+      confidence: entry.confidence,
+      reasoning: entry.reasoning,
+    },
+    created_at: entry.createdAt,
+  };
+}

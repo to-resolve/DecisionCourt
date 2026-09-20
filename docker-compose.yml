@@ -1,0 +1,208 @@
+# syntax=docker/dockerfile:1.6
+# DecisionCourt docker-compose v0.8.3 (P0-3 容器硬化)
+#
+# 关键安全变更:
+#   1. 所有 image 锁具体版本(去掉 :latest)
+#   2. postgres / redis 端口从 host 网络移除(只走 backend 内部访问)
+#   3. backend / frontend 加 user: "10001:10001" 切非 root
+#   4. cap_drop: [ALL] + no-new-privileges 限制容器能力
+#   5. 关键卷 read_only: true + tmpfs 写临时目录
+#   6. JWT_SECRET 必填(:?报错),不再有默认值
+#
+# v0.8.3 决定:统一用 Bocha API 做 search,SearXNG 服务已移除。
+#
+# 注意:
+#   - 本 compose 文件只用于生产/部署。开发请用 docker-compose.dev.yml
+#   - .env 必须在宿主机存在(里面含真实 LLM_KEY / JWT_SECRET / DB_PASSWORD / BOCHA_API_KEY)
+#   - POSTGRES_PASSWORD 必须足够长(建议 32 字符)
+version: "3.8"
+
+services:
+  postgres:
+    # P0-3：锁版本(去 :latest)。postgres 15.x 是稳定 LTS。
+    image: postgres:15.13-alpine
+    container_name: dc_postgres
+    # v0.8.3 安全：去掉 host 端口映射(只允许内部网络访问)
+    expose:
+      - "5432"
+    # v0.9.2: 日志轮转。每个容器 stdout 最多 30MB (10MB × 3 个文件),
+    # 防止 json-file 驱动无限增长撑爆 ECS 磁盘。
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-decisioncourt}
+      # P0-3：DB 密码从 env 读(无默认值)。docker-compose fail-fast。
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set in .env}
+      POSTGRES_DB: ${POSTGRES_DB:-decisioncourt}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    # v0.8.3 安全：postgres 进程在容器内以非 root 运行
+    user: "70:70" # postgres user
+    # v0.8.3 安全：read_only: true + tmpfs 给临时目录
+    read_only: true
+    tmpfs:
+      - /tmp
+      - /run/postgresql
+    # v0.8.3 安全：最小权限
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "pg_isready -U ${POSTGRES_USER:-decisioncourt} -d ${POSTGRES_DB:-decisioncourt}",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  redis:
+    image: redis:7.4.1-alpine
+    container_name: dc_redis
+    # v0.8.3 安全：去掉 host 端口
+    expose:
+      - "6379"
+    volumes:
+      - redis_data:/data
+    user: "999:999" # redis user
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  backend:
+    # 本地学习部署:从 ./backend 本地构建(原作者 ACR 是私有仓库,外部拉不到)
+    build:
+      context: ./backend
+    image: decisioncourt-local/backend:latest
+    container_name: dc_backend
+    user: "1001:1001" # 与 Dockerfile adduser uid:gid 对齐
+    environment:
+      PORT: 8080
+      # P0-3：DATABASE_URL 从 env 读,无默认值。
+      DATABASE_URL: ${DATABASE_URL:?DATABASE_URL must be set in .env}
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379}
+      LLM_PROVIDER: ${LLM_PROVIDER:-deepseek}
+      LLM_API_KEY: ${LLM_API_KEY:-}
+      LLM_BASE_URL: ${LLM_BASE_URL:-https://api.deepseek.com/v1}
+      LLM_MODEL_V3: ${LLM_MODEL_V3:-deepseek-chat}
+      LLM_MODEL_R1: ${LLM_MODEL_R1:-deepseek-reasoner}
+      # v0.9 (ADR 0013): LLM Gateway 三件套(默认关闭,线上开)
+      # v0.10.21 PR-A: 总开关默认改为 true，让子能力（cache/breaker/file_logger）能生效
+      AGENT_GATEWAY_ENABLED: ${AGENT_GATEWAY_ENABLED:-true}
+      AGENT_GATEWAY_LLM_TIMEOUT_SEC: ${AGENT_GATEWAY_LLM_TIMEOUT_SEC:-90}
+      AGENT_GATEWAY_CACHE_ENABLED: ${AGENT_GATEWAY_CACHE_ENABLED:-false}
+      AGENT_GATEWAY_CACHE_TTL_SEC: ${AGENT_GATEWAY_CACHE_TTL_SEC:-300}
+      AGENT_GATEWAY_CACHE_MAX_ENTRIES: ${AGENT_GATEWAY_CACHE_MAX_ENTRIES:-10000}
+      AGENT_GATEWAY_BREAKER_ENABLED: ${AGENT_GATEWAY_BREAKER_ENABLED:-false}
+      AGENT_GATEWAY_BREAKER_FAILURE_RATIO: ${AGENT_GATEWAY_BREAKER_FAILURE_RATIO:-0.5}
+      AGENT_GATEWAY_BREAKER_MIN_REQUESTS: ${AGENT_GATEWAY_BREAKER_MIN_REQUESTS:-10}
+      AGENT_GATEWAY_BREAKER_OPEN_TIMEOUT_SEC: ${AGENT_GATEWAY_BREAKER_OPEN_TIMEOUT_SEC:-30}
+      # v0.10.22 PR-A: FileLogger 默认启用（logs/backend/agent_gateway_YYYY-MM-DD.log）
+      # 详见 production-retrospective-2026-08-05.md §4 P1-1 + ACTION-ITEMS-ECS-EXPIRY-2026-08.md §B1
+      AGENT_GATEWAY_FILE_LOGGER: ${AGENT_GATEWAY_FILE_LOGGER:-true}
+      AGENT_GATEWAY_LOG_DIR: ${AGENT_GATEWAY_LOG_DIR:-logs}
+      # v0.9 (ADR 0014): 用户级 trial 限流(0 禁用)
+      USER_TRIAL_LIMIT: ${USER_TRIAL_LIMIT:-5}
+      # v0.8.3 决定：默认 Bocha(必填 BOCHA_API_KEY)
+      SEARCH_PROVIDER: ${SEARCH_PROVIDER:-bocha}
+      TAVILY_API_KEY: ${TAVILY_API_KEY:-}
+      # v0.8.3 决定：默认 Bocha。本地学习部署 SEARCH_PROVIDER=mock 不需要 key,改为允许为空;
+      # 若改用 bocha 搜索,在 .env 填 BOCHA_API_KEY 真值即可
+      BOCHA_API_KEY: ${BOCHA_API_KEY:-}
+      # P0-2：JWT_SECRET 必填,无默认值。docker-compose :? 报 fail。
+      JWT_SECRET: ${JWT_SECRET:?JWT_SECRET must be set in .env}
+      JWT_EXPIRY_HOURS: ${JWT_EXPIRY_HOURS:-168}
+      # P1-1：AllowedOrigins 生产必须覆盖为 https://yourdomain.com
+      ALLOWED_ORIGINS: ${ALLOWED_ORIGINS:-}
+      # 生产 COOKIE_SECURE 必须 true(HTTPS-only)
+      COOKIE_SECURE: ${COOKIE_SECURE:-true}
+      COOKIE_SAME_SITE: ${COOKIE_SAME_SITE:-Lax}
+    # v0.8.3 安全：去掉 host 端口(只通过 nginx/ALB 反代访问)
+    expose:
+      - "8080"
+    # v0.9.2: 挂载 /app/logs 到宿主机(持久化 LLM Gateway 文件日志)
+    volumes:
+      - ./logs/backend:/app/logs
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+  frontend:
+    # 本地学习部署:从 ./frontend 本地构建,NEXT_PUBLIC_* 是 build-time 变量必须走 args
+    build:
+      context: ./frontend
+      args:
+        NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://localhost}
+        NEXT_PUBLIC_WS_URL: ${NEXT_PUBLIC_WS_URL:-ws://localhost}
+        NEXT_PUBLIC_USE_MOCK: ${NEXT_PUBLIC_USE_MOCK:-false}
+    image: decisioncourt-local/frontend:latest
+    container_name: dc_frontend
+    user: "1001:1001"
+    environment:
+      # 容器间访问 backend(同 docker 网络)
+      NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://backend:8080}
+      NEXT_PUBLIC_WS_URL: ${NEXT_PUBLIC_WS_URL:-ws://backend:8080}
+      NEXT_PUBLIC_USE_MOCK: ${NEXT_PUBLIC_USE_MOCK:-false}
+    expose:
+      - "3000"
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    depends_on:
+      - backend
+    restart: unless-stopped
+
+  # v0.9: 反代 + 自动 HTTPS(Caddy 反代 backend / frontend)
+  caddy:
+    image: caddy:2-alpine
+    container_name: dc_caddy
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      DOMAIN: ${DOMAIN:?DOMAIN must be set}
+      CADDY_EMAIL: ${CADDY_EMAIL:?CADDY_EMAIL must be set}
+    volumes:
+      - ./deploy/caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+      # v0.10.21 PR-E (P2-C2): access_log 落地（卷挂载 ./logs/caddy:/data/caddy）
+      # Caddyfile 配置 output file /data/caddy/access.log { roll_size 100mb roll_keep 5 }
+      # 触发: production-retrospective-2026-08-05.md §4 P2-1
+      - ./logs/caddy:/data/caddy
+    depends_on:
+      - backend
+      - frontend
+
+volumes:
+  postgres_data:
+  redis_data:
+  caddy_data:
+  caddy_config:

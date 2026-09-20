@@ -1,0 +1,457 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* 案卷·印章 字体变量（与 next/font/local 的 Geist 变量共享） */
+:root {
+  --font-serif: var(--font-geist-sans);
+  --font-body: var(--font-geist-sans);
+  --font-mono: var(--font-geist-mono);
+}
+
+@layer base {
+  :root {
+    --background: 36 33% 96%;
+    --foreground: 24 12% 9%;
+    --card: 36 33% 97%;
+    --card-foreground: 24 12% 9%;
+    --popover: 36 33% 97%;
+    --popover-foreground: 24 12% 9%;
+    --primary: 24 12% 9%;
+    --primary-foreground: 36 33% 97%;
+    --secondary: 36 22% 92%;
+    --secondary-foreground: 24 12% 9%;
+    --muted: 36 22% 92%;
+    --muted-foreground: 28 9% 35%;
+    --accent: 36 22% 92%;
+    --accent-foreground: 24 12% 9%;
+    --destructive: 6 65% 45%;
+    --destructive-foreground: 36 33% 97%;
+    --border: 33 20% 87%;
+    --input: 33 20% 87%;
+    --ring: 24 12% 9%;
+    --radius: 0.25rem;
+  }
+}
+
+@layer base {
+  * {
+    @apply border-border;
+  }
+  body {
+    @apply bg-paper text-ink font-body;
+    background-image:
+      radial-gradient(circle at 25% 25%, rgba(168, 159, 142, 0.05) 1px, transparent 1px),
+      radial-gradient(circle at 75% 75%, rgba(168, 159, 142, 0.05) 1px, transparent 1px);
+    background-size: 32px 32px;
+    background-attachment: fixed;
+  }
+
+  /* 中文字号使用 font-feature-settings 优化字距 */
+  :lang(zh) {
+    font-feature-settings: "palt" 1;
+  }
+
+  /* serif 标题使用 Noto Serif SC 时，启用更优雅的连字 */
+  .font-serif {
+    font-feature-settings: "palt" 1, "kern" 1;
+    font-weight: 500;
+  }
+}
+
+@layer components {
+  /* 案卷输入框（克制、无 inset 阴影） */
+  .inset-input {
+    @apply bg-white border border-rule rounded-sm px-4 py-3 text-ink placeholder:text-inkFaint font-body;
+    transition: border-color 0.2s ease, background-color 0.2s ease;
+  }
+
+  .inset-input:focus {
+    @apply outline-none bg-paper border-ink/30;
+  }
+
+  /* 案卷卡片（纸张感、克制阴影） */
+  .inset-card {
+    @apply bg-white border border-rule rounded-sm shadow-paper;
+  }
+
+  /* 案卷夹：证据卡片 */
+  .evidence-folder {
+    @apply bg-white border-l-4 border-r border-y border-rule px-4 py-3 relative;
+    box-shadow:
+      inset 2px 0 0 var(--folder-tab, #B53A2E),
+      0 1px 0 rgba(26, 24, 21, 0.04);
+  }
+
+  /* 庭审角色卡片（serif 名 + 圆形头像） */
+  .agent-card {
+    @apply flex flex-col items-center gap-2 px-3 py-4;
+  }
+
+  /* 印章样式 */
+  .seal-stamp {
+    @apply relative inline-flex items-center justify-center rounded-full text-seal-ink font-serif font-black;
+    background:
+      radial-gradient(circle at 50% 50%, #C8342A 0%, #C8342A 70%, #A8271E 100%);
+    box-shadow:
+      inset 0 0 0 3px rgba(74, 15, 10, 0.6),
+      inset 0 0 0 4px rgba(200, 52, 42, 0.4),
+      0 2px 0 #4A0F0A,
+      0 4px 12px rgba(74, 15, 10, 0.3);
+    color: rgba(255, 250, 245, 0.95);
+    text-shadow: 0 1px 0 rgba(74, 15, 10, 0.5);
+  }
+
+  /* 案卷分隔线 */
+  .paper-rule {
+    @apply border-t border-rule;
+  }
+
+  /* 庭审气泡（serif 内容） */
+  .speech-bubble-paper {
+    @apply bg-white border border-rule rounded-sm px-4 py-3 max-w-xs;
+    box-shadow: 0 1px 0 rgba(26, 24, 21, 0.04);
+  }
+
+  /* 案卷徽章：阶段提示 */
+  .phase-ribbon {
+    @apply inline-flex items-center gap-2 px-3 py-1 bg-paperDeep border border-rule text-inkSoft text-xs;
+    font-family: var(--font-serif), "Noto Serif SC", serif;
+    letter-spacing: 0.05em;
+  }
+}
+
+@layer utilities {
+  /* 强制使用 serif（即使被 tailwind 覆盖） */
+  .text-display {
+    font-family: var(--font-serif), "Noto Serif SC", "ZCOOL XiaoWei", Georgia, serif;
+    font-feature-settings: "palt" 1;
+  }
+
+  /* 案卷纸张纹理叠加 */
+  .paper-overlay {
+    position: relative;
+  }
+
+  .paper-overlay::before {
+    content: "";
+    position: absolute;
+    inset: 0;
+    pointer-events: none;
+    background:
+      repeating-linear-gradient(
+        0deg,
+        rgba(168, 159, 142, 0.02) 0px,
+        transparent 1px,
+        transparent 32px
+      );
+  }
+}
+
+/* ReactFlow 容器 — 确保有尺寸（修复 #004 错误） */
+.reactflow-host {
+  width: 100%;
+  height: 100%;
+  position: relative;
+}
+
+/* ──────────────────────────────────────────────────────────
+ * ThinkingBubble 动画
+ * 云朵呼吸 + 整块淡入淡出。
+ * 整块 .thinking-bubble 在 activeThinking 切换为 undefined 后会卸载，
+ * 但卸载前会跑 220ms 的 fade-out keyframes。
+ * ────────────────────────────────────────────────────────── */
+@keyframes thinking-fade-in {
+  from {
+    opacity: 0;
+    transform: translateY(-4px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+@keyframes thinking-fade-out {
+  to {
+    opacity: 0;
+    transform: translateY(-4px);
+  }
+}
+@keyframes cloud-drift {
+  0%,
+  100% {
+    transform: translateY(0) translateX(0);
+  }
+  25% {
+    transform: translateY(-1px) translateX(0.5px);
+  }
+  50% {
+    transform: translateY(0) translateX(-0.5px);
+  }
+  75% {
+    transform: translateY(-0.5px) translateX(0);
+  }
+}
+@keyframes cloud-pulse {
+  0%,
+  100% {
+    opacity: 0.85;
+  }
+  50% {
+    opacity: 1;
+  }
+}
+
+.thinking-bubble {
+  animation: thinking-fade-in 220ms ease-out;
+}
+
+.thinking-bubble .cloud {
+  display: inline-block;
+  font-size: 16px;
+  color: #a89f8e;
+  animation:
+    cloud-drift 2.4s ease-in-out infinite,
+    cloud-pulse 1.6s ease-in-out infinite;
+  will-change: transform, opacity;
+}
+
+/* 控方思考条左侧的细条用主色（红） */
+.thinking-prosecutor {
+  border-left: 3px solid #b53a2e;
+}
+.thinking-defender {
+  border-left: 3px solid #2c5470;
+}
+
+/* v0.5 修复：AgentAvatar 在律师思考时挂 `thinking-prosecutor` /
+ * `thinking-defender` class + Tailwind 的 ring-4，但 globals.css 之前只
+ * 定义了 border-left 颜色（跟 Tailwind ring 是不同 box-model，ring 实际
+ * 没着色）。这里补：让 ring 有明显主色 + 1.6s 呼吸脉冲，参考调查员
+ * spinner 用 animate-spin 的"动起来"语言，让用户能立刻感知"律师在
+ * 思考"而不是静态变粗。
+ *
+ * 必须配合 Tailwind ring-4 使用：ring-4 控制 box-shadow 厚度，
+ * --thinking-ring-color 控制颜色，animation 让它呼吸。
+ * 关键：box-shadow 动画在主线程跑，性能可接受；不用 transform 是
+ * 因为头像本身已 scale-105。 */
+@keyframes ring-think-pulse {
+  0%,
+  100% {
+    box-shadow:
+      0 0 0 4px var(--thinking-ring-color, #b53a2e),
+      0 0 0 0 var(--thinking-ring-color, #b53a2e);
+  }
+  50% {
+    box-shadow:
+      0 0 0 4px var(--thinking-ring-color, #b53a2e),
+      0 0 0 8px transparent;
+  }
+}
+
+.thinking-prosecutor {
+  --thinking-ring-color: #b53a2e; /* 绛红：控方主色 */
+  border-left: 3px solid #b53a2e;
+  animation: ring-think-pulse 1.6s ease-in-out infinite;
+}
+.thinking-defender {
+  --thinking-ring-color: #2c5470; /* 深青：辩方主色 */
+  border-left: 3px solid #2c5470;
+  animation: ring-think-pulse 1.6s ease-in-out infinite;
+}
+
+/* InvestigatorPanel 的 spinner 复用 Tailwind 的 animate-spin 已经够用 */
+
+.reactflow-host .react-flow {
+  width: 100%;
+  height: 100%;
+  background: transparent;
+}
+
+.reactflow-host .react-flow__renderer {
+  width: 100%;
+  height: 100%;
+}
+
+/* ============= v0.5+ Verdict 页面打印样式 ============= */
+/* 用户点击"导出 PDF"时 window.print() 触发，整页按纸张尺寸重排。 */
+/* 设计目标：A4 单栏打印，背景白色，隐藏交互元素。 */
+@media print {
+  /* 1. 隐藏交互/装饰元素 */
+  .print\:hidden,
+  button,
+  .seal-stamp {
+    display: none !important;
+  }
+
+  /* 2. 强制白底 + 黑色文字（覆盖 paper 暖色调，方便打印省墨） */
+  body,
+  .paper-overlay,
+  .bg-paper,
+  .bg-paperDeep,
+  .bg-white {
+    background: #ffffff !important;
+    color: #000000 !important;
+  }
+
+  /* 3. 移除动画 + 阴影 + 圆角（打印不需要） */
+  *,
+  *::before,
+  *::after {
+    animation: none !important;
+    transition: none !important;
+    box-shadow: none !important;
+    text-shadow: none !important;
+  }
+
+  /* 4. 卡片：去掉背景色和边框宽度，只保留主分割线 */
+  .shadow-paper,
+  .shadow-paper-lg,
+  .border-rule {
+    box-shadow: none !important;
+    border-color: #999999 !important;
+  }
+
+  /* 5. 颜色: 控/辩/审三色用深色印刷（玫红/蓝/琥珀 → 黑/深灰/深灰） */
+  .text-prosecution,
+  .text-prosecution-ink,
+  .bg-prosecution,
+  .border-prosecution {
+    color: #000000 !important;
+    background: transparent !important;
+    border-color: #000000 !important;
+  }
+  .text-defense,
+  .text-defense-ink,
+  .bg-defense,
+  .border-defense {
+    color: #333333 !important;
+    background: transparent !important;
+    border-color: #333333 !important;
+  }
+  .text-judge,
+  .text-gold,
+  .bg-judge,
+  .border-judge {
+    color: #555555 !important;
+    background: transparent !important;
+    border-color: #555555 !important;
+  }
+
+  /* 6. 评分条：黑色实心 */
+  .bg-prosecution,
+  .bg-defense {
+    background: #000000 !important;
+  }
+
+  /* 7. 关键：每个 section 自然分页 */
+  section {
+    page-break-inside: avoid;
+    break-inside: avoid;
+  }
+
+  /* 8. 庭审流程容器：不要限制 max-height，让所有 transcript 都能打印 */
+  .max-h-\[480px\] {
+    max-height: none !important;
+    overflow: visible !important;
+  }
+
+  /* 9. 页边距 */
+  @page {
+    margin: 1.5cm 1cm;
+  }
+}
+
+/* ============================================================================
+   v2.0 厕所标识剪影小人 SVG 样式
+   ============================================================================
+   设计原则 (V2.0-PLAN.md §1.2):
+   - 纯色剪影 (无渐变无细节)
+   - 5 角色: 控方律师/辩方律师/调查员/法官/书记员
+   - 对称剪影 (左右镜像)
+   - CSS var 解耦颜色: 改色不改 SVG path
+   - 走路/点头/举手/敲锤 4 类 CSS keyframes 动画
+   ============================================================================ */
+
+:root {
+  /* 角色色 — 与 tailwind.config.ts 案卷·印章 token 对齐 */
+  --silhouette-prosecutor: #B53A2E; /* 绛红 */
+  --silhouette-defender: #2C5470;   /* 深青 */
+  --silhouette-investigator: #7A5C3F; /* 棕金 */
+  --silhouette-judge: #5C564F;      /* 深灰 */
+  --silhouette-clerk: #A89F8E;       /* 米褐 */
+}
+
+/* 角色色应用: 复用 tailwind class 名模式 */
+.silhouette-prosecutor  { color: var(--silhouette-prosecutor); }
+.silhouette-defender    { color: var(--silhouette-defender); }
+.silhouette-investigator { color: var(--silhouette-investigator); }
+.silhouette-judge       { color: var(--silhouette-judge); }
+.silhouette-clerk       { color: var(--silhouette-clerk); }
+
+/* 走路 — 双脚交替 (0.8s 循环, transform-origin 防止抖动) */
+@keyframes silhouette-walk {
+  0%, 100% { transform: translateY(0) rotate(0deg); }
+  25%      { transform: translateY(-2px) rotate(5deg); }   /* 左脚抬起 */
+  75%      { transform: translateY(-2px) rotate(-5deg); }  /* 右脚抬起 */
+}
+
+.silhouette-leg-left {
+  animation: silhouette-walk 0.8s ease-in-out infinite;
+  transform-origin: center top;
+}
+
+.silhouette-leg-right {
+  animation: silhouette-walk 0.8s ease-in-out infinite reverse;
+  transform-origin: center top;
+}
+
+/* 点头 — 身体微微点头 (1.2s 循环) */
+@keyframes silhouette-nod {
+  0%, 100% { transform: rotate(0deg); }
+  50%      { transform: rotate(8deg); }
+}
+
+.silhouette-nod {
+  animation: silhouette-nod 1.2s ease-in-out infinite;
+  transform-origin: center bottom;
+}
+
+/* 举手指控 — 律师专属 (2s 循环 + 抬升) */
+@keyframes silhouette-point {
+  0%, 100% { transform: rotate(0deg) translateY(0); }
+  50%      { transform: rotate(-15deg) translateY(-3px); }
+}
+
+.silhouette-arm-pointing {
+  animation: silhouette-point 2s ease-in-out infinite;
+  transform-origin: center bottom;
+}
+
+/* 调查员放大镜 — 旋转 */
+@keyframes silhouette-magnify {
+  0%, 100% { transform: rotate(0deg); }
+  50%      { transform: rotate(20deg); }
+}
+
+.silhouette-magnifier {
+  animation: silhouette-magnify 1.5s ease-in-out infinite;
+  transform-origin: center center;
+}
+
+/* 法官敲锤 — 关键帧 */
+@keyframes silhouette-gavel {
+  0%, 100% { transform: rotate(0deg) translateY(0); }
+  30%      { transform: rotate(-10deg) translateY(-4px); }  /* 举锤 */
+  60%      { transform: rotate(10deg) translateY(0); }      /* 落锤 */
+}
+
+.silhouette-gavel {
+  animation: silhouette-gavel 0.4s ease-in-out infinite;
+  transform-origin: center bottom;
+}
+
+/* 走路/点头期间头像不闪烁 (GPU 加速) */
+.silhouette-avatar * {
+  will-change: transform;
+}

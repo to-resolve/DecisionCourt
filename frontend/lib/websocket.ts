@@ -1,0 +1,269 @@
+import type { CourtEvent, UserActionRequest } from "@/types";
+import { getMockWebSocket } from "./mock/mockWebSocket";
+import { computeBackoff, resetBackoff, INITIAL_RETRY_DELAY_MS, MAX_RETRY_DELAY_MS as _MAX_RETRY_DELAY_MS } from "./reconnect";
+import { ensureAuthToken, getWSURL } from "./auth";
+
+export type CourtEventHandler = (event: CourtEvent) => void;
+
+const useMock = process.env.NEXT_PUBLIC_USE_MOCK === "true";
+
+// 心跳：每 25s 一次（早于 nginx/ALB 默认的 60s idle 超时），让中间代理
+// 不会把连接当成 idle 杀掉。服务端会在收到 {type:"ping"} 时立即回 pong。
+const HEARTBEAT_INTERVAL_MS = 25_000;
+
+export class CourtWebSocket {
+  private socket: ReturnType<typeof getMockWebSocket> | null = null;
+  private realSocket: WebSocket | null = null;
+  private handlers: Map<string, CourtEventHandler[]> = new Map();
+  private url: string;
+
+  // === v0.8.3 新增：自动重连 + 心跳状态 ===
+  // closedByUser 区分"用户主动 disconnect"和"网络断开" —— 前者不重连。
+  private closedByUser = false;
+  private retryDelayMs = INITIAL_RETRY_DELAY_MS;
+  private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+  private heartbeatTimer: ReturnType<typeof setInterval> | null = null;
+  private missedPongs = 0;
+  // 2026-08-22 用户反馈 bug 修复: 区分"初始 connect"和"重连",
+  // 避免每次新庭审右下角先闪"网络中断,正在重连"再"已恢复连接"。
+  // 只有"曾经连接成功过"之后的重连才调 onConnectionStateChange("reconnecting")。
+  // 初始 connect 静默成功,onConnectionStateChange("connected") 仍正常触发,
+  // toast 只在"重连成功"时显示 "已恢复" (避免每次开庭重复 toast)。
+  private hasConnectedOnce = false;
+  // 客户端监听重连事件，前端可显示"网络恢复中..." toast。
+  private readonly onReconnectAttempt?: (attempt: number, delayMs: number) => void;
+  private readonly onConnectionStateChange?: (state: "connected" | "reconnecting" | "closed") => void;
+
+  constructor(
+    sessionId: string,
+    options?: {
+      onReconnectAttempt?: (attempt: number, delayMs: number) => void;
+      onConnectionStateChange?: (state: "connected" | "reconnecting" | "closed") => void;
+    },
+  ) {
+    // v0.8.3 安全(P0-1 + Q4)：URL 自动加 ?token=xxx（auth 助手负责）。
+    // 后端 query 优先验签,失败回落到 cookie。
+    this.url = useMock ? "" : getWSURL(sessionId);
+    this.onReconnectAttempt = options?.onReconnectAttempt;
+    this.onConnectionStateChange = options?.onConnectionStateChange;
+
+    if (useMock) {
+      this.socket = getMockWebSocket();
+    } else {
+      // 确保有有效 token(异步,但不阻塞构造)
+      void ensureAuthToken().then(() => {
+        // 拿到新 token 后用最新 URL 重连
+        this.url = getWSURL(sessionId);
+        this.connectRealSocket();
+      });
+    }
+  }
+
+  /**
+   * connectRealSocket opens a new WebSocket and wires up its event handlers.
+   * Called both for the initial connect AND for every reconnect attempt.
+   */
+  private connectRealSocket() {
+    if (this.closedByUser) return;
+
+    // 2026-08-22 用户反馈 bug 修复: 只有"曾经连接过"之后的重连才广播
+    // "reconnecting" 状态。初始 connect 不广播 (避免新庭审每次都闪"重连中")。
+    if (this.hasConnectedOnce) {
+      this.onConnectionStateChange?.("reconnecting");
+    }
+    try {
+      this.realSocket = new WebSocket(this.url);
+    } catch (err) {
+      console.error("[WebSocket] failed to construct:", err);
+      this.scheduleReconnect();
+      return;
+    }
+
+    this.realSocket.onopen = () => {
+      console.log("[WebSocket] connected to", this.url);
+      this.retryDelayMs = resetBackoff(); // 重置退避（重连成功 → 回到 1s）
+      this.missedPongs = 0;
+      const isReconnect = this.hasConnectedOnce;
+      this.hasConnectedOnce = true; // 标记已首次连接,后续断开才算"重连"
+      this.onConnectionStateChange?.("connected");
+      // 2026-08-22: 只有"重连成功"才 toast "已恢复",初始 connect 静默
+      // (CourtroomScene 已经在 ws 拿到 sessionUUID 时调了 connect,无需重复 toast)。
+      if (isReconnect) {
+        // toast 已在 CourtroomScene 里 onConnectionStateChange("connected") 触发
+        // 这里只标记,实际 toast 逻辑不在这层。
+      }
+      this.startHeartbeat();
+    };
+    this.realSocket.onmessage = (msg) => {
+      try {
+        const event = JSON.parse(msg.data) as CourtEvent;
+        // 收到服务端 pong → 标记这次心跳成功。如果连续多个周期没收到
+        // pong（mock 模式永远不会发），我们自己主动关闭重连，避免
+        // TCP 半连接挂死。
+        if (event.type === "pong") {
+          this.missedPongs = 0;
+          return;
+        }
+        this.dispatch(event);
+      } catch {
+        // ignore invalid messages
+      }
+    };
+    this.realSocket.onerror = (err) => {
+      console.error("[WebSocket] error:", err);
+      // 错误不直接重连：onclose 一定会随后触发，统一在那里 schedule。
+    };
+    this.realSocket.onclose = () => {
+      console.log("[WebSocket] closed");
+      this.stopHeartbeat();
+      // v1.0-patch (2026-08-22): closedByUser 检查必须在 onConnectionStateChange
+      // 之前 — 用户主动 disconnect (切换 trial) 不应弹 "连接已断开" toast。
+      if (this.closedByUser) return;
+      this.onConnectionStateChange?.("closed");
+      this.scheduleReconnect();
+    };
+  }
+
+  /**
+   * scheduleReconnect applies exponential backoff and re-opens the socket.
+   * Called both after onclose (server-driven) and after repeated missed
+   * heartbeats (client-driven).
+   */
+  private scheduleReconnect() {
+    if (this.closedByUser) return;
+    if (this.reconnectTimer) return; // 已经在排队了
+
+    const delay = this.retryDelayMs;
+    this.onReconnectAttempt?.(this.getReconnectAttemptCount(), delay);
+    this.reconnectTimer = setTimeout(() => {
+      this.reconnectTimer = null;
+      this.retryDelayMs = computeBackoff(this.retryDelayMs);
+      this.connectRealSocket();
+    }, delay);
+  }
+
+  // 简单计数：每次重连都 +1（只在内存里，不持久化）。
+  private reconnectAttempts = 0;
+  private getReconnectAttemptCount(): number {
+    return this.reconnectAttempts++;
+  }
+
+  /**
+   * startHeartbeat fires every HEARTBEAT_INTERVAL_MS. We track how many
+   * pings we've sent without receiving a matching pong. If two in a row
+   * get missed we treat the socket as dead (half-open TCP) and force a
+   * reconnect — this is how we detect "服务端 nginx 偷偷 close 了连接"
+   * scenarios that wouldn't trigger onclose on our side.
+   */
+  private startHeartbeat() {
+    this.stopHeartbeat();
+    this.missedPongs = 0;
+    this.heartbeatTimer = setInterval(() => {
+      if (this.realSocket?.readyState === WebSocket.OPEN) {
+        try {
+          this.realSocket.send(JSON.stringify({ type: "ping" }));
+          this.missedPongs++;
+          // 发了 ping 但下一周期还没收到 pong（即使 pong 也算本周期成功）
+          if (this.missedPongs >= 2) {
+            console.warn("[WebSocket] no pong received — forcing reconnect");
+            this.realSocket.close(); // 会触发 onclose → scheduleReconnect
+          }
+        } catch (err) {
+          console.error("[WebSocket] heartbeat send failed:", err);
+          this.realSocket.close();
+        }
+      } else if (this.realSocket?.readyState === WebSocket.CLOSED) {
+        // 已经死了，主动触发 onclose 路径
+        this.scheduleReconnect();
+      }
+    }, HEARTBEAT_INTERVAL_MS);
+  }
+
+  private stopHeartbeat() {
+    if (this.heartbeatTimer) {
+      clearInterval(this.heartbeatTimer);
+      this.heartbeatTimer = null;
+    }
+  }
+
+  connect() {
+    if (this.socket) {
+      this.socket.connect();
+      this.socket.on("*", (event) => this.dispatch(event));
+    }
+    return this;
+  }
+
+  on(event: string, handler: CourtEventHandler) {
+    if (!this.handlers.has(event)) {
+      this.handlers.set(event, []);
+    }
+    this.handlers.get(event)!.push(handler);
+    return this;
+  }
+
+  off(event: string, handler: CourtEventHandler) {
+    const list = this.handlers.get(event);
+    if (list) {
+      this.handlers.set(
+        event,
+        list.filter((h) => h !== handler)
+      );
+    }
+    return this;
+  }
+
+  send(action: UserActionRequest) {
+    if (this.socket) {
+      this.socket.send({ type: "user.action", payload: action });
+    } else if (this.realSocket && this.realSocket.readyState === WebSocket.OPEN) {
+      this.realSocket.send(JSON.stringify({ type: "user.action", payload: action }));
+    }
+  }
+
+  disconnect() {
+    // v0.8.3 修复：disconnect 必须清理所有 timer，否则 setTimeout 会
+    // 持续触发 scheduleReconnect，组件卸载后还在重连（内存泄漏）。
+    this.closedByUser = true;
+    if (this.reconnectTimer) {
+      clearTimeout(this.reconnectTimer);
+      this.reconnectTimer = null;
+    }
+    this.stopHeartbeat();
+    // v1.0-patch (2026-08-22): 不再显式广播 "closed" 状态。
+    // 用户主动 disconnect (切换 trial / 路由变化) 不应弹 "连接已断开" toast —
+    // onclose 会自然触发 onConnectionStateChange("closed"), 由 onclose
+    // 内部的 closedByUser 检查阻止 scheduleReconnect (不重连), 但仍会
+    // 调一次 callback 触发 toast。修复: 让 onclose 先判 closedByUser 再
+    // 调 onConnectionStateChange (下面 onclose handler 已改)。
+
+    if (this.socket) {
+      this.socket.disconnect();
+    }
+    if (this.realSocket) {
+      const { CONNECTING, OPEN } = WebSocket;
+      if (this.realSocket.readyState === CONNECTING) {
+        // Abort the in-flight handshake gracefully to avoid
+        // "closed before the connection is established" console noise.
+        this.realSocket.onerror = null;
+        this.realSocket.onopen = () => this.realSocket?.close();
+      } else if (this.realSocket.readyState === OPEN) {
+        this.realSocket.close();
+      }
+      this.realSocket = null;
+    }
+  }
+
+  private dispatch(event: CourtEvent) {
+    const list = this.handlers.get(event.type) || [];
+    const wildcard = this.handlers.get("*") || [];
+    [...list, ...wildcard].forEach((handler) => handler(event));
+  }
+}
+
+export function createCourtWebSocket(
+  sessionId: string,
+  options?: ConstructorParameters<typeof CourtWebSocket>[1],
+): CourtWebSocket {
+  return new CourtWebSocket(sessionId, options).connect();
+}

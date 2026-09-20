@@ -1,0 +1,24 @@
+{
+  "extends": ["next/core-web-vitals", "next/typescript"],
+  "globals": {
+    "sessionStorage": "readonly",
+    "localStorage": "readonly"
+  },
+  "rules": {
+    "@typescript-eslint/no-unused-vars": [
+      "error",
+      {
+        "argsIgnorePattern": "^_",
+        "varsIgnorePattern": "^_",
+        "caughtErrorsIgnorePattern": "^_"
+      }
+    ],
+    "no-eval": "error",
+    "no-implied-eval": "error",
+    "no-new-func": "error",
+    "no-script-url": "error",
+    "react/no-danger": "error",
+    "react/jsx-no-script-url": "error",
+    "react/no-unknown-property": "off"
+  }
+}
