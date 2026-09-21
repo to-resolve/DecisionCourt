@@ -1,2 +1,26 @@
+# ⚠️ `packages` 字段**必须存在**，不要删。
+#
+# 这个文件是上游带的（pnpm 10/11 的新式配置：`allowBuilds` 这类设置只能写在
+# pnpm-workspace.yaml 里，所以即使不是 monorepo 也会有这个文件）。
+#
+# 但 pnpm 9 只要看到这个文件，就要求必须声明 `packages:`，否则直接报
+#     ERROR  packages field missing or empty
+# 然后 `pnpm install` 退出 1。前端不是 monorepo，用 ["."] 声明"只有根包"即可。
+#
+# 为什么之前没人发现（2026-09-21）：
+#   1. 本地开发用 pnpm 11，接受"只有 allowBuilds、没有 packages"的写法
+#   2. CI 固定 pnpm 9 → `Frontend (Next.js)` 与 `Dependency audit` 两个 job
+#      的 install 步骤 100% 失败，Type check / Unit tests / Build / pnpm audit
+#      全部被 skip
+#   3. 服务器 Docker 构建也没暴露 —— `frontend/Dockerfile` 只
+#      `COPY package.json pnpm-lock.yaml`，**没拷贝本文件**，pnpm 9 根本看不到它
+# 即"本地过、Docker 过、只有 CI 挂"，而且 CI 当时还因为 workflow 文件无效压根没跑。
+#
+# 两版 pnpm 均已验证：
+#   pnpm 9.15.9  install --frozen-lockfile --lockfile-only  → Done in 1.2s
+#   pnpm 11.18.0 install --frozen-lockfile --lockfile-only  → Done in 16s
+packages:
+  - "."
+
 allowBuilds:
   unrs-resolver: true
