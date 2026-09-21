@@ -229,10 +229,12 @@ pnpm exec node --experimental-strip-types --test "lib/**/*.test.ts"
 
 同名修正也应用到 `frontend/package.json` 的 `test` 脚本：原 `$(find lib -name '*.test.ts')` 依赖 POSIX shell，在 Windows 上 npm 用 cmd 执行 `scripts` → 本地 `npm test` 直接失败。改成 glob 后跨平台一致（本地实测 117 项）。
 
-> ⚠️ **但护栏目前仍不会在 CI 生效**：`frontend-test` job 卡在更前面的 `Install dependencies`（`pnpm install`），
-> `Type check` / `Unit tests` / `Build` 三步全部 `skipped`。详见 §5.3，这是**独立且尚未修复**的问题。
+> ⚠️ 只改 glob 还不够：当时 `frontend-test` job 卡在更前面的 `Install dependencies`，
+> `Type check` / `Unit tests` / `Build` 三步全部 `skipped`，护栏依然不会跑。
+> 直到 §5.3 的 `pnpm install` 问题修掉，glob 才真正生效（现已在 CI 里执行全部 117 项）。
+> **"改了护栏"和"护栏在生效"是两件事，中间每一步依赖失败都会让前者白做。**
 
-### 5.3 未修复（本轮仅定位）：CI 里两个 job 的 `pnpm install` 都失败
+### 5.3 CI 里两个 job 的 `pnpm install` 都失败 —— 已定位并修复
 
 修好 workflow 结构后，第一次真实运行暴露出：**两个需要装前端依赖的 job 都死在 install**。
 
@@ -241,20 +243,102 @@ pnpm exec node --experimental-strip-types --test "lib/**/*.test.ts"
 | `Frontend (Next.js)` | `Install dependencies`（`pnpm install`） | `Type check` / `Unit tests` / `Build` **全部 skipped** |
 | `Dependency audit` | `pnpm install (frozen lockfile)` | `pnpm audit (high+)` **skipped** |
 
-已排除的可能：
+#### 5.3.1 先把失败原因变成可读的
 
-| 假设 | 验证方式 | 结果 |
+job 日志要鉴权才能通过 API 读（`/actions/jobs/<id>/logs` 对**公开仓库**也返回 403），
+不带 token 时 step log 里只剩一句 `Process completed with exit code 1.`，等于没有信息量。
+
+而 `/check-runs/<id>/annotations` **无需鉴权**。所以给两个 install 步骤加了
+"失败时把日志尾部用 `::error::` workflow command 输出为 annotation"（退出码原样透传）：
+
+```yaml
+set +e
+pnpm install 2>&1 | tee /tmp/pnpm-install.log
+code=${PIPESTATUS[0]}
+if [ "$code" -ne 0 ]; then
+  esc=$(tail -c 2000 /tmp/pnpm-install.log | tr -d '\r' | sed ':a;N;$!ba;s/%/%25/g;s/\n/%0A/g')
+  echo "::error title=pnpm install failed (exit $code)::$esc"
+fi
+exit $code
+```
+
+下一次运行立刻读到了真正的错误：
+
+```
+ERROR  packages field missing or empty
+For help, run: pnpm help install
+```
+
+> 这一手是本次排查的关键技巧：**把"M 级信息"变成"无需鉴权即可程序化获取"的信息**，
+> 否则只能靠人工点开网页。值得长期保留。
+
+#### 5.3.2 根因：pnpm 9 与 pnpm 10/11 的配置文件代际差异
+
+`frontend/pnpm-workspace.yaml`（**上游带的、已入库**）：
+
+```yaml
+allowBuilds:
+  unrs-resolver: true
+```
+
+- 这是 **pnpm 10/11 的新式写法**：`allowBuilds` 这类设置只能写在
+  `pnpm-workspace.yaml` 里，所以**即使不是 monorepo 也会有这个文件，且没有 `packages:`**
+- **pnpm 9 只要看到该文件，就强制要求 `packages:` 字段，缺失即报错退出**
+- CI 固定 `pnpm 9`（`pnpm/action-setup@v4 with version: 9`），本地是 **pnpm 11.18.0** → 只有 CI 挂
+
+#### 5.3.3 为什么这个失败从没被人看到（"本地过 / Docker 过 / 只有 CI 挂"）
+
+| 环境 | 是否看到 `pnpm-workspace.yaml` | 结果 |
 |---|---|---|
-| 锁文件与 `package.json` 不一致 | 逐项对比 `pnpm-lock.yaml` 的 `importers['.']` specifier 与 `package.json` | ✅ 完全一致（`lockfileVersion: 9.0`） |
-| CI 用 pnpm 9、本地 pnpm 11，版本偏斜导致 `--frozen-lockfile` 拒绝 | 用 `pnpm@9.15.9 install --frozen-lockfile --lockfile-only` 校验 | ✅ 1 秒通过，锁文件本身没问题 |
+| 本地开发（pnpm 11.18） | 看到，但接受"无 `packages`"的写法 | ✅ 通过 |
+| 服务器 Docker 构建（`corepack prepare pnpm@9.15.4`） | **看不到** —— `frontend/Dockerfile` 只 `COPY package.json pnpm-lock.yaml`，没拷这个文件 | ✅ 通过 |
+| GitHub CI（pnpm 9） | 看到 | ❌ `packages field missing or empty` |
 
-结论：**不是锁文件问题，故障发生在真实下载/安装阶段**（网络、postinstall 构建脚本或某个包的解析）。
+三者叠加：本地复现不出来、Docker 复现不出来、而 CI 又因为 §5.1 的 workflow 无效
+压根没跑过 —— 于是一个 **100% 必现的失败**隐身了很久。
 
-> 待办：拿到 CI 日志正文才能定位（`/actions/jobs/<id>/logs` 需要鉴权）。本地已复现实验（`CI=true pnpm@9 install --frozen-lockfile`），
-> 若本地能通过而 CI 不能，则应往 runner 侧的网络/缓存方向查；若本地同样失败，则拿到了真实报错。
+#### 5.3.4 修法与验证
 
-**这一条直接削弱了 §5.2 的收益**：glob 改动让测试文件"会被执行"，但只要 install 先失败，护栏依然不会跑。
-必须把这个修掉，"CI 绿了"才重新可信。
+加 `packages: ["."]`（前端不是 monorepo，声明"只有根包"）。两版 pnpm 均实测：
+
+| 命令 | 结果 |
+|---|---|
+| `pnpm@9.15.9 install --frozen-lockfile --lockfile-only`（修复前） | ❌ `ERROR packages field missing or empty` —— **与 CI 报错逐字一致** |
+| `pnpm@9.15.9 install --frozen-lockfile --lockfile-only`（修复后） | ✅ `Done in 1.2s` |
+| `pnpm@11.18.0 install --frozen-lockfile --lockfile-only`（修复后） | ✅ `Done in 16s` |
+
+> 反向验证的价值：**先在本地复现出与 CI 一模一样的报错**，再改代码让它消失。
+> 比"改一版推上去看绿不绿"快得多，而且能证明因果。
+
+修好后 `Test` workflow 首次全绿：
+
+```
+Backend (Go)       => success   (go vet / build / unit tests)
+Frontend (Next.js) => success   (Install / Type check / Unit tests / Build)  ← 首次全部执行
+Dependency audit   => success   (install / pnpm audit)
+Doc cross-links    => success   (首次作为独立 job 存在)
+```
+
+**至此 §5.2 的 glob 改动才真正生效** —— `lib/**/*.test.ts`（117 项，含本 ADR 的
+CSRF 护栏）第一次在 CI 里被执行。在此之前，"护栏"两个字是假的。
+
+#### 5.3.5 连带效应（⚠️ 需要决策）
+
+`Deploy` workflow 由 `workflow_run: Test → completed` 触发、且 gate 在
+`Test.conclusion == 'success'`。**Test 从没成功过 → Deploy 一直 skipped；现在 Test 绿了
+→ 每次推 main 都会真跑 Deploy，而它第一步 `Login to ACR` 就失败**（阿里云 ACR 凭据已失效，
+项目早已迁到腾讯云 CVM + tar + docker compose 手工部署）。
+
+失败发生在 `Login to ACR`，`Build & push` 与 `Deploy to ECS` 全部 skipped →
+**没有产出镜像、没有 SSH 到任何服务器**，是"红但不危险"。但一条永远红的流水线会掩盖
+真正的失败信号（与本 ADR 的主线教训同源）。
+
+可选处置（属部署策略，需用户决定，不在本 ADR 擅自变更范围内）：
+
+1. 把 `deploy.yml` 的触发器收敛为 `push tags` + `workflow_dispatch`，去掉
+   `workflow_run`（推荐：与"已不用 ACR/ECS"的现状一致，发版改由 tag 驱动）
+2. 若仍要保留 CI/CD，则更新 ACR / ECS 相关 Secrets 并重定向到现有服务器
+3. 在 GitHub UI 里 disable 该 workflow（最省事，但配置漂移会留在仓库里）
 
 ---
 
@@ -268,8 +352,10 @@ pnpm exec node --experimental-strip-types --test "lib/**/*.test.ts"
 | `decision_events` 表（该庭审） | 前端事件 0 行 | `fe.trial_started` / `state_transition` 各 1 行，`status=ok` |
 | 页面错误 | 15+ 条 403 error | 无 |
 | `npm test`（Windows 本地） | 失败（cmd 不认 `$(find)`） | 117 pass / 0 fail |
-| `test.yml` 是否真的执行 | **从未执行**（文件无效，0 job） | 4 job 正常启动 |
-| CI 是否执行 auth/random/csrf 三个测试文件 | 否（文件从未被解析） | 已纳入 glob，**但当前仍被 install 失败阻断**（§5.3） |
+| `test.yml` 是否真的执行 | **从未执行**（文件无效，0 job） | 4 job 全绿 |
+| CI 是否执行 auth/random/csrf 三个测试文件 | 否（文件从未被解析） | ✅ 是（glob，117 项，Unit tests 步骤 success） |
+| CI 里 `pnpm install` | 两个 job 都失败（`packages field missing or empty`） | ✅ 两个 job 都成功 |
+| `Deploy` workflow | 一直被 skip（Test 从未成功） | 开始真跑并失败在 `Login to ACR` —— 见 §5.3.5（待决策） |
 
 ### 6.1 公网验证原始输出（关键片段）
 
@@ -314,6 +400,16 @@ pnpm exec node --experimental-strip-types --test "lib/**/*.test.ts"
 3. **硬编码测试文件清单 = 护栏会过期。** 新增测试文件不会自动进 CI，而且没有任何提示。用 glob / discovery。
 4. **YAML 里注释不改变缩进层级。** 漏写一个 job ID，代码会被静默并入上一个 job；要么解析失败，要么"看起来在跑其实没跑"。**CI 配置本身也需要被检查**（本轮用一个 20 行的结构扫描脚本发现了它）。
 5. **静默降级比报错更危险。** 缺 cookie 就悄悄不发埋点，比留一个 403 让控制台变红糟糕得多——后者会被发现。
+6. **"从没跑过"和"跑了但失败"在界面上都是红色。** 查 CI 的第一步应该是确认
+   "这次运行到底有几个 job"，而不是看红绿（`name` 是否回落到文件路径是最好用的判据）。
+7. **工具链的"代际差异"会在最难发现的地方咬人。** 同一份配置，pnpm 11 接受、pnpm 9 拒绝；
+   本地过、Docker 过（因为它没 COPY 那个文件）、只有 CI 挂。**凡是有版本锁定的地方，
+   都存在这种"只在某一个环境成立"的失败** —— 唯一可靠的验证是**在那个环境里跑**。
+8. **先把 CI 的错误变成"可程序化读取"的，再排查。** job log 要鉴权，但
+   `::error::` annotation 不要。花 10 行 YAML 把 M 级信息升一级，后面每一次排查都受益。
+9. **先在本地复现出与 CI 逐字一致的报错，再改代码。** 本轮的
+   `pnpm@9 install --frozen-lockfile --lockfile-only` 复现 → 改 → 复验，比"推上去看绿不绿"
+   快一个数量级，而且建立了因果，不是碰巧。
 
 ---
 
@@ -324,5 +420,5 @@ pnpm exec node --experimental-strip-types --test "lib/**/*.test.ts"
 - ADR 0020 —— 前端埋点设计（`lib/transport.ts` 的由来）
 - `frontend/lib/csrf.ts`、`frontend/lib/csrf.test.ts`
 - `frontend/lib/transport.ts`、`frontend/lib/api.ts`
-- `.github/workflows/test.yml`、`frontend/package.json`
-- `docs/learn/服务器部署实操手册.md` §19（埋点 CSRF 坑）、§20（CI 自身的两个静默缺陷）
+- `.github/workflows/test.yml`、`frontend/package.json`、`frontend/pnpm-workspace.yaml`
+- `docs/learn/服务器部署实操手册.md` §19（埋点 CSRF 坑）、§20（CI 自身的静默缺陷）
