@@ -84,10 +84,8 @@ services:
     restart: unless-stopped
 
   backend:
-    # 本地学习部署:从 ./backend 本地构建(原作者 ACR 是私有仓库,外部拉不到)
-    build:
-      context: ./backend
-    image: decisioncourt-local/backend:latest
+    # v0.9.1: ECS 2C2G build OOM,改用预构建镜像(本机 build → ACR push)
+    image: crpi-rnawo8jx69bslvbx.cn-hongkong.personal.cr.aliyuncs.com/decision-court/decision-court-backend:latest
     container_name: dc_backend
     user: "1001:1001" # 与 Dockerfile adduser uid:gid 对齐
     environment:
@@ -120,9 +118,7 @@ services:
       # v0.8.3 决定：默认 Bocha(必填 BOCHA_API_KEY)
       SEARCH_PROVIDER: ${SEARCH_PROVIDER:-bocha}
       TAVILY_API_KEY: ${TAVILY_API_KEY:-}
-      # v0.8.3 决定：默认 Bocha。本地学习部署 SEARCH_PROVIDER=mock 不需要 key,改为允许为空;
-      # 若改用 bocha 搜索,在 .env 填 BOCHA_API_KEY 真值即可
-      BOCHA_API_KEY: ${BOCHA_API_KEY:-}
+      BOCHA_API_KEY: ${BOCHA_API_KEY:?BOCHA_API_KEY must be set in .env (or override SEARCH_PROVIDER)}
       # P0-2：JWT_SECRET 必填,无默认值。docker-compose :? 报 fail。
       JWT_SECRET: ${JWT_SECRET:?JWT_SECRET must be set in .env}
       JWT_EXPIRY_HOURS: ${JWT_EXPIRY_HOURS:-168}
@@ -151,14 +147,8 @@ services:
     restart: unless-stopped
 
   frontend:
-    # 本地学习部署:从 ./frontend 本地构建,NEXT_PUBLIC_* 是 build-time 变量必须走 args
-    build:
-      context: ./frontend
-      args:
-        NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://localhost}
-        NEXT_PUBLIC_WS_URL: ${NEXT_PUBLIC_WS_URL:-ws://localhost}
-        NEXT_PUBLIC_USE_MOCK: ${NEXT_PUBLIC_USE_MOCK:-false}
-    image: decisioncourt-local/frontend:latest
+    # v0.9.1: ECS 2C2G build OOM,改用预构建镜像(本机 build → ACR push)
+    image: crpi-rnawo8jx69bslvbx.cn-hongkong.personal.cr.aliyuncs.com/decision-court/decision-court-frontend:latest
     container_name: dc_frontend
     user: "1001:1001"
     environment:
@@ -184,9 +174,8 @@ services:
     container_name: dc_caddy
     restart: unless-stopped
     ports:
-      # 对外端口可配置:本地默认 80/443;大陆服务器用 CADDY_HTTP_PORT=8080 绕开备案扫描
-      - "${CADDY_HTTP_PORT:-80}:80"
-      - "${CADDY_HTTPS_PORT:-443}:443"
+      - "80:80"
+      - "443:443"
     environment:
       DOMAIN: ${DOMAIN:?DOMAIN must be set}
       CADDY_EMAIL: ${CADDY_EMAIL:?CADDY_EMAIL must be set}

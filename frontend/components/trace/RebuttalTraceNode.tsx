@@ -41,6 +41,37 @@ export function RebuttalTraceNode({ sessionUUID }: RebuttalTraceNodeProps) {
 
   useEffect(() => {
     if (useMock) {
+      // v1.0-patch-2 (Bug-10 MEDIUM 修复): mock 模式填一组 demo 数据,
+      // 首页 demo 场景下用户能看到反驳链功能 (而非空态)。
+      setLinks([
+        {
+          id: "demo-1",
+          session_id: "demo-session",
+          rebutted_evidence_id: "demo-evi-001",
+          aggressor_agent: "prosecutor",
+          status: "standing",
+          rationale: "对方证据 E001 与本案关键事实无直接关联。",
+          created_at: new Date().toISOString(),
+        },
+        {
+          id: "demo-2",
+          session_id: "demo-session",
+          rebutted_evidence_id: "demo-evi-001",
+          aggressor_agent: "defender",
+          status: "overturned",
+          rationale: "该证据已通过补充证据翻盘 (cross-exam round 2)。",
+          created_at: new Date().toISOString(),
+        },
+        {
+          id: "demo-3",
+          session_id: "demo-session",
+          rebutted_evidence_id: "demo-evi-002",
+          aggressor_agent: "investigator",
+          status: "withdrawn",
+          rationale: "调查员主动撤回。",
+          created_at: new Date().toISOString(),
+        },
+      ] as RebuttalLink[]);
       setLoading(false);
       return;
     }
@@ -101,7 +132,7 @@ export function RebuttalTraceNode({ sessionUUID }: RebuttalTraceNodeProps) {
                   <Badge variant="outline" className={statusColors[link.status] ?? ""}>
                     {link.aggressor_agent}
                   </Badge>
-                  <span className="flex-1 break-words">
+                  <span className="flex-1 whitespace-pre-wrap break-words">
                     {link.rationale || <em className="text-stone-500">(无理由)</em>}
                   </span>
                 </li>

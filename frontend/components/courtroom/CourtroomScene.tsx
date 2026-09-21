@@ -57,6 +57,8 @@ import {
   Brain,
   Activity,
   History,
+  ArrowLeft, // v1.0-patch-2: 返回首页按钮
+  Scale, // v2.1 O-2: 当事人对照行天平图标
 } from "lucide-react";
 
 interface CourtroomSceneProps {
@@ -86,10 +88,14 @@ export function CourtroomScene({ sessionId }: CourtroomSceneProps) {
     beliefDiffs,
     convergenceInfo,
     setSession,
+    setAgents,
+    addEvidence,
     addMessage,
     setPendingUserAction,
     setVerdict,
     toggleRealCourthouseMode,
+    setBeliefDiffs,
+    reset, // v1.0-patch-2: 返回首页按钮 + handleViewVerdict 都用
   } = useCourtroomStore();
 
   const [ws, setWs] = useState<ReturnType<typeof createCourtWebSocket> | null>(
@@ -198,6 +204,7 @@ export function CourtroomScene({ sessionId }: CourtroomSceneProps) {
   // WebSocket 连接 (原 useEffect 残留, 移出 try/catch 包裹)
   // eslint-disable-next-line react-hooks/exhaustive-deps
   useEffect(() => {
+    let mounted = true;
     const socket = createCourtWebSocket(sessionId, {
       // v0.10.17 silent-error-fix PR 3: WS 连接状态变化 → toast 反馈。
       // 之前只在 console.log 打印,用户看不到。
@@ -350,6 +357,7 @@ export function CourtroomScene({ sessionId }: CourtroomSceneProps) {
     socket.on("*", handler);
 
     return () => {
+      mounted = false;
       socket.off("*", handler);
       socket.disconnect();
     };
@@ -421,8 +429,20 @@ export function CourtroomScene({ sessionId }: CourtroomSceneProps) {
     const res = await api.getVerdict(sessionId);
     if (res.code === 0) {
       setVerdict(res.data);
+      // v1.0-patch-2: verdict 页会重新 hydrate, 不需要这里 reset()。但保险起见
+      // 也清掉 cotTrail / pendingUserAction (本地 UI 状态), 防止 verdict 页残留。
+      reset();
       router.push(`/verdict/${sessionId}`);
     }
+  };
+
+  // v1.0-patch-2 (Bug-UI-1 修复): 用户反馈"庭审回访按钮全是 bug"之一。
+  // 原 CourtroomScene header 只有案件标题 + 庭审回放 + 开庭/查看判决書/直接判决,
+  // 没有"返回首页"按钮, 用户进入庭审后只能浏览器 back (会跨页面残留 store)。
+  // 修复: header 左上加返回按钮, 跳首页前先 reset() 清 store 防残留。
+  const handleReturnHome = () => {
+    reset();
+    router.push("/");
   };
 
   const prosecutor = agents.find((a) => a.agent_type === "prosecutor");
@@ -453,11 +473,22 @@ export function CourtroomScene({ sessionId }: CourtroomSceneProps) {
   }
 
   return (
-    <div className="h-screen bg-paper text-ink flex flex-col overflow-hidden">
+    <div className="h-screen bg-paper text-ink flex flex-col overflow-x-clip overflow-y-hidden">
       {/* Header — 案卷封面 */}
-      <header className="border-b border-rule bg-paperDeep sticky top-0 z-10">
+      <header className="border-b border-rule bg-paperDeep shrink-0">
         <div className="container mx-auto max-w-6xl px-6 py-4 flex items-center justify-between">
           <div className="flex items-baseline gap-4">
+            {/* v1.0-patch-2 (Bug-UI-1 修复): 返回首页按钮 — 替代原"庭审页只能浏览器 back" */}
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={handleReturnHome}
+              className="text-ink hover:bg-paper rounded-sm px-2 h-8 text-xs font-data tracking-wider print:hidden"
+              data-testid="courtroom-back-home-button"
+            >
+              <ArrowLeft className="w-3.5 h-3.5 mr-1" />
+              返回首页
+            </Button>
             {/* 案卷章 */}
             <span className="seal-stamp w-10 h-10 text-base leading-none flex items-center justify-center">
               判
@@ -618,11 +649,34 @@ export function CourtroomScene({ sessionId }: CourtroomSceneProps) {
       )}
 
       {/* Main content */}
-      <div className="flex-1 container mx-auto max-w-6xl px-6 py-5 flex gap-5 overflow-hidden">
-        {/* Courtroom scene */}
-        <div className="flex-1 flex flex-col gap-5 min-w-0 overflow-y-auto">
-          {/* Agent arena — 庭审中央 */}
-          <div className="relative flex flex-col items-center justify-start py-5 bg-white border border-rule rounded-sm shadow-paper">
+      <div className="flex-1 min-h-0 container mx-auto max-w-6xl px-6 py-5 flex gap-5 overflow-hidden">
+        {/* Courtroom scene
+            v2.1 修横向滚动 (Bug-UI-侧栏溢出):
+            - overflow-y-auto 改为 overflow-y-auto + overflow-x-clip,防御气泡/长内容撑出
+            - min-w-0 让 flex 子项目允许收缩,不被气泡 w-60(240px) 撑宽 */}
+        {/* v2.1 Bug-1 修:移除 overflow-y-auto,让 panel 自然按内容撑开,
+            这样 clerk 名字 + 中文标签 + CLERK 不会被截。
+            保留 overflow-x-clip 防横向滚动。
+            副作用:内容多时 main 区会推 EvidenceBoard 下面 — 因为证据
+            数量有限 + viewport 在 900h 仍够看,不影响正常 trial。 */}
+        <div className="flex-1 flex flex-col gap-5 min-w-0 overflow-x-clip">
+          {/* Agent arena — 庭审中央
+                v2.1 O-3: 加 .scene-shell + 装饰元素 (装订线/折角/印章 mini) — 不动现有 flex/bg/border/shadow
+                加 overflow-hidden 防止装订线/印章角标准视觉溢出 panel 边界,配合外层 overflow-x-clip 保持防横向滚动 */}
+          <div className="relative flex flex-col items-center justify-start py-5 bg-white border border-rule rounded-sm shadow-paper min-w-0 scene-shell overflow-y-auto pb-12">
+            {/* 案卷·印章 装饰 (v2.1 O-3):
+                - 左侧装订线 (含 3 个圆孔)
+                - 四角折角
+                - 右上迷你印章「判」 */}
+            <div className="scene-binding" aria-hidden>
+              <span className="scene-binding-hole" />
+            </div>
+            <div className="scene-fold-tl" aria-hidden />
+            <div className="scene-fold-tr" aria-hidden />
+            <div className="scene-fold-bl" aria-hidden />
+            <div className="scene-fold-br" aria-hidden />
+            <div className="scene-seal-mini" aria-label="判" />
+
             {/* 案卷标题 */}
             <div className="absolute top-3 left-4 phase-ribbon z-10">
               庭审现场
@@ -640,31 +694,47 @@ export function CourtroomScene({ sessionId }: CourtroomSceneProps) {
               )}
             </div>
 
-            {/* 当事人对照行（最醒目） */}
-            <div className="w-full max-w-3xl px-4 mt-9 mb-1">
-              <div className="flex items-center justify-center gap-6">
-                <div className="flex-1 text-right">
+            {/* 当事人对照行 (最醒目)
+                v2.1 修横向滚动: option_a/option_b 极长时,加 min-w-0 + break-words 防撑出 grid
+                v2.1 O-2: emoji ⚖ 升为 lucide Scale icon + 左右天平盘小圆点 + 偏倚条 */}
+            <div className="w-full max-w-3xl px-4 mt-9 mb-1 min-w-0">
+              <div className="flex items-center justify-center gap-4 min-w-0">
+                <div className="flex-1 min-w-0 text-right">
                   <div className="text-[10px] uppercase tracking-[0.25em] text-prosecution-ink font-data mb-0.5">
                     控方主张
                   </div>
-                  <div className="text-display text-lg font-semibold text-ink leading-tight">
+                  <div className="text-display text-lg font-semibold text-ink leading-tight break-words">
                     {session.option_a}
                   </div>
                 </div>
-                <div className="text-display text-inkFaint text-2xl font-light px-3">
-                  ⚖
+                {/* 天平中心 (v2.1 O-2) — icon + 左右小圆点 + 中央支柱 */}
+                <div
+                  className="flex flex-col items-center shrink-0 px-3"
+                  aria-label="对照天平"
+                  data-testid="compare-scale"
+                >
+                  <Scale
+                    className="w-7 h-7 text-judge-ink"
+                    strokeWidth={1.5}
+                    aria-hidden
+                  />
+                  <div className="flex items-center gap-1 mt-1">
+                    <span className="w-1.5 h-1.5 rounded-full bg-prosecution" />
+                    <span className="w-px h-2 bg-inkFaint/40" />
+                    <span className="w-1.5 h-1.5 rounded-full bg-defense" />
+                  </div>
                 </div>
-                <div className="flex-1 text-left">
+                <div className="flex-1 min-w-0 text-left">
                   <div className="text-[10px] uppercase tracking-[0.25em] text-defense-ink font-data mb-0.5">
                     辩方主张
                   </div>
-                  <div className="text-display text-lg font-semibold text-ink leading-tight">
+                  <div className="text-display text-lg font-semibold text-ink leading-tight break-words">
                     {session.option_b}
                   </div>
                 </div>
               </div>
               {/* 细线分隔 */}
-              <div className="border-t border-rule mt-2" />
+              <div className="border-t border-rule mt-3" />
             </div>
 
             <div className="w-full max-w-3xl flex flex-col items-center gap-3 px-4 pb-1">
@@ -684,8 +754,9 @@ export function CourtroomScene({ sessionId }: CourtroomSceneProps) {
                 />
               )}
 
-              {/* Middle row: prosecutor - investigator/clerk - defender */}
-              <div className="w-full grid grid-cols-3 items-start gap-4">
+              {/* Middle row: prosecutor - investigator/clerk - defender
+                  v2.1 修横向滚动: grid 三列加 min-w-0 防御气泡 w-60 把 cell 撑宽 */}
+              <div className="w-full grid grid-cols-3 items-start gap-4 min-w-0">
                 {/* Left: prosecutor */}
                 <div className="flex justify-center">
                   {prosecutor ? (
@@ -702,8 +773,9 @@ export function CourtroomScene({ sessionId }: CourtroomSceneProps) {
                   ) : null}
                 </div>
 
-                {/* Center: investigator + clerk (stacked) */}
-                <div className="flex flex-col items-center justify-center gap-6">
+                {/* Center: investigator + clerk (stacked)
+                    v2.1 Bug-1 修:加 pb-2 让 clerk 色盘 + 名字 + role 不被 panel 底边切 */}
+                <div className="flex flex-col items-center justify-center gap-6 pb-3">
                   {investigator ? (
                     <AgentAvatar
                       agent={investigator}
@@ -855,10 +927,12 @@ export function CourtroomScene({ sessionId }: CourtroomSceneProps) {
         </div>
       </div>
 
-      {/* Bottom input bar */}
-      <div className="border-t border-rule bg-paperDeep px-6 py-4">
-        <div className="container mx-auto max-w-6xl">
-          <div className="flex items-center gap-2">
+      {/* Bottom input bar
+          v2.1 修横向滚动: toolbar 加 min-w-0 + overflow-x-clip 防御 CTA 按钮(i.e. 开始质证)
+          出现时撑破 layout */}
+      <div className="border-t border-rule bg-paperDeep px-6 py-4 min-w-0 overflow-x-clip">
+        <div className="container mx-auto max-w-6xl min-w-0">
+          <div className="flex items-center gap-2 min-w-0">
             <div className="flex items-center gap-2">
               <Button
                 size="sm"

@@ -459,7 +459,7 @@ func (r *ReActRunner) Run(ctx context.Context, transcript []model.Message) (Spea
 					Confidence:   out.Confidence,
 					Stance:       out.Stance,
 				}
-				speaker, _ = applySpeakerStanceJudge(speaker, r, ctx, messages)
+				speaker, _, _ = applySpeakerStanceJudge(speaker, r, ctx, messages)
 				speaker, _ = applySpeakerNoveltyRetryLoop(speaker, r, ctx, messages)
 				// v1.0.2 候选 4: 已反驳证据 hard reject (streamSucceeded 路径)
 				sessionIDStr := r.cfg.MemoryMeta.SessionUUID
@@ -527,7 +527,7 @@ func (r *ReActRunner) Run(ctx context.Context, transcript []model.Message) (Spea
 				Confidence:   out.Confidence,
 				Stance:       out.Stance,
 			}
-			speaker, _ = applySpeakerStanceJudge(speaker, r, ctx, messages)
+			speaker, _, _ = applySpeakerStanceJudge(speaker, r, ctx, messages)
 			speaker, _ = applySpeakerNoveltyRetryLoop(speaker, r, ctx, messages)
 			// v1.0.2 候选 4: 已反驳证据 hard reject (与 stance/novelty 同级 guard,
 			// 在 length limit 之前, 让最终 Speaker 不会引用 standing rebuttal)
@@ -750,16 +750,19 @@ func applySpeakerStanceJudge(
 	r *ReActRunner,
 	ctx context.Context,
 	messages []llm.Message,
-) (Speaker, []llm.Message) {
+) (Speaker, []llm.Message, error) {
 	// 1. fast filter: 老 isStanceConsistent 一致时跳过 judge (省 token)
 	if isStanceConsistent(r.cfg.SpeakerAgent, out.Stance) {
-		return out, messages
+		return out, messages, nil
 	}
 
 	// 2. judge LLM 调用 + 2 次 retry
 	for retryIdx := 0; retryIdx < stanceJudgeMaxRetries; retryIdx++ {
 		// 调 judge LLM
-		judgePrompt := StanceJudgePrompt(r.cfg.SpeakerAgent.AgentType, r.cfg.SpeakerBeliefA, out.Content)
+		judgePrompt, err := StanceJudgePrompt(r.cfg.SpeakerAgent.AgentType, r.cfg.SpeakerBeliefA, out.Content)
+		if err != nil {
+			return out, messages, fmt.Errorf("build stance judge prompt: %w", err)
+		}
 		judgeMessages := []llm.Message{
 			{Role: "system", Content: judgePrompt},
 		}
@@ -778,7 +781,7 @@ func applySpeakerStanceJudge(
 			// judge LLM 失败 → 标记 fallback
 			out.StanceRejected = true
 			out.StanceJudgeReason = "judge LLM 调用失败: " + judgeErr.Error()
-			return out, messages
+			return out, messages, nil
 		}
 
 		// 3. 解析 judge 输出
@@ -790,12 +793,12 @@ func applySpeakerStanceJudge(
 			// 解析失败 → 标记 fallback (保守放行 Speaker)
 			out.StanceRejected = true
 			out.StanceJudgeReason = "judge 输出非 JSON: " + truncate(judgeContent, 50)
-			return out, messages
+			return out, messages, nil
 		}
 
 		if judgeResult.IsConsistent {
 			// judge 判定一致 → pass
-			return out, messages
+			return out, messages, nil
 		}
 
 		// 4. judge 判定不一致 → 注入 hint 让 LLM 换内容重生成
@@ -825,19 +828,19 @@ func applySpeakerStanceJudge(
 		if retryErr != nil {
 			out.StanceRejected = true
 			out.StanceJudgeReason = judgeResult.Reason
-			return out, retryMsgs
+			return out, retryMsgs, nil
 		}
 		var retryOut AgentOutput
 		if err := json.Unmarshal([]byte(retryContent), &retryOut); err != nil {
 			out.StanceRejected = true
 			out.StanceJudgeReason = judgeResult.Reason
-			return out, retryMsgs
+			return out, retryMsgs, nil
 		}
 		retryOut.NormalizeAction()
 		if retryOut.Action != ActionSpeak || retryOut.Content == "" {
 			out.StanceRejected = true
 			out.StanceJudgeReason = judgeResult.Reason
-			return out, retryMsgs
+			return out, retryMsgs, nil
 		}
 		// 5. 更新 out + messages, 下一轮循环再 judge
 		out = Speaker{
@@ -855,12 +858,16 @@ func applySpeakerStanceJudge(
 	// 重做一次 judge 拿最新 reason (上面循环最后一次 judge 已保存, 重新调 1 次拿 reason)
 	finalReason := judgeStanceOnce(r, ctx, r.cfg.SpeakerAgent.AgentType, r.cfg.SpeakerBeliefA, out.Content)
 	out.StanceJudgeReason = finalReason
-	return out, messages
+	return out, messages, nil
 }
 
 // judgeStanceOnce 单次调 judge LLM, 用于 applySpeakerStanceJudge 最后 fallback 拿 reason
 func judgeStanceOnce(r *ReActRunner, ctx context.Context, agentType model.AgentType, beliefA float64, content string) string {
-	judgePrompt := StanceJudgePrompt(agentType, beliefA, content)
+	judgePrompt, err := StanceJudgePrompt(agentType, beliefA, content)
+	if err != nil {
+		// sanitize 失败 → 静默吞掉, fallback 给空 reason (避免挡下 trial)
+		return ""
+	}
 	judgeMessages := []llm.Message{{Role: "system", Content: judgePrompt}}
 	judgeContent, _, err := r.llm.Complete(
 		r.injectGatewayTrace(ctx, "react_stance_judge_final"),
@@ -975,6 +982,14 @@ func (r *ReActRunner) streamSpeakContent(
 		case <-streamCtx.Done():
 			// ctx 取消（外部 cancel / 30s 超时）—— 立刻返回 false
 			// 让调用方走 retry 兜底，不能让 for-range 卡住整个 trial。
+			//
+			// v2.6 D2 fix (2026-09-21): WARN 日志记录 context canceled 原因 +
+			// 已收集 chunk 数 + raw 前缀, 避免 silent error 黑洞 (cross-exam
+			// content 全空但不报错). 详见 docs/todo/deferred-items-2026-08-21.md D2.
+			slog.Warn("react_runner streamSpeakContent ctx canceled",
+				"chunks", chunks,
+				"raw_prefix", truncateForLog(collected.String(), 200),
+			)
 			return "", false
 		case c, ok := <-ch:
 			if !ok {
@@ -983,6 +998,12 @@ func (r *ReActRunner) streamSpeakContent(
 				break
 			}
 			if c.Err != nil {
+				// v2.6 D2 fix (2026-09-21): chunk 错误 silent 返 false, 现加 WARN.
+				slog.Warn("react_runner streamSpeakContent chunk err",
+					"err", c.Err,
+					"chunks", chunks,
+					"raw_prefix", truncateForLog(collected.String(), 200),
+				)
 				return "", false
 			}
 			if c.Done {
@@ -1047,15 +1068,14 @@ func (r *ReActRunner) streamSpeakContent(
 		// 2026-08-22 用户反馈 bug 修复: silent error 黑洞 — 流式解析可能收集了
 		// raw 但 lastExtracted 仍空(LLM 输出了畸形 JSON: `{"content":""}` 闭合 quote 后
 		// partial 提取到了空字符串;或 LLM 输出非 JSON markdown 代码块)。
-		// 打印 raw 帮助诊断 (上限 500 字符避免日志爆)。
-		rawDump := collected.String()
-		if len(rawDump) > 500 {
-			rawDump = rawDump[:500] + "...(truncated)"
-		}
+		// 打印 raw 帮助诊断。
+		//
+		// v2.6 D2 fix (2026-09-21): 用 truncateForLog helper 统一 truncation 风格
+		// (避免 LLM 末尾 UTF-8 切半 + 注明总长便于诊断).
 		slog.Warn("streamSpeakContent: empty lastExtracted",
 			"chunks", chunks,
 			"raw_len", collected.Len(),
-			"raw_preview", rawDump,
+			"raw_preview", truncateForLog(collected.String(), 500),
 		)
 		return "", false
 	}
@@ -1165,4 +1185,17 @@ func truncateForPrompt(s string, max int) string {
 		return s
 	}
 	return s[:max] + "..."
+}
+
+// truncateForLog 截断字符串到 n 字节, 末尾追加 "...(truncated, total=NB)".
+//
+// v2.6 D2 fix (2026-09-21): 用于 streamSpeakContent 三处 WARN 日志避免 LLM 长
+// 输出撑爆日志. 与 truncateForPrompt 不同: (1) 注明总字节数便于诊断完整长度;
+// (2) 接受 UTF-8 末尾切半风险 vs 日志可读性权衡 (LLM 输出混入控制字符时
+// 截断的位置用户可控).
+func truncateForLog(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	return s[:n] + "...(truncated, total=" + fmt.Sprintf("%d", len(s)) + "B)"
 }

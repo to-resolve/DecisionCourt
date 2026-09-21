@@ -19,9 +19,7 @@
     # 触发: production-retrospective-2026-08-05.md §4 P2-1
     # 当前完全看不到真实 HTTP 流量（只有 frontend 后端反代，没法审计外部 IP / 4xx / 慢请求）
     # 卷挂载见 docker-compose.yml caddy 段：./logs/caddy:/data/caddy
-    # 本地修复:官方 caddy:2-alpine 没有 access_log 指令(那是第三方插件),
-    # 标准访问日志指令是 log,语法等价。
-    log {
+    access_log {
         output file /data/caddy/access.log {
             roll_size 100mb
             roll_keep 5

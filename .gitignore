@@ -45,18 +45,28 @@ coverage/
 
 # Test artifacts（集成测试输出的 UUID-named JSON 快照；本地保留，仓库不追踪）
 backend/test-output/
+# v2.0 REDESIGN PR-D1 加: Playwright E2E 产物 (截图 / video / trace)
+# 见 docs/postmortem/v2.0-redesign-3d-pivot.md (2026-08-23 回退后, 规则保留以防未来重启用)
+frontend/test-output/
+frontend/test-results/
 
 # Database
 *.db
 *.sqlite
 
 # Docker
+# 上游忽略所有 .dockerignore，但 frontend/.dockerignore 是容器构建必需：
+# 它把 pnpm-workspace.yaml 排除出构建上下文，否则容器内 pnpm@9.15.4 见到
+# 「只有 allowBuilds、没有 packages 字段」的 workspace 文件会直接报
+# "packages field missing or empty" 构建失败。故对 frontend/ 开例外。
 .dockerignore
-# 例外：frontend/.dockerignore 是构建正确性的一部分（排除 pnpm-workspace.yaml），必须入库
 !frontend/.dockerignore
 docker-compose.override.yml
 
-# WorkBuddy agent 工作区（记忆/日志，不属于项目代码）
+# 误入版本的 pnpm 临时文件（frontend/_tmp_<pid>_<hash>）
+frontend/_tmp_*
+
+# Agent 本地工作区（memory / 运维脚本，不属于项目代码）
 .workbuddy/
 
 # Local secrets backups

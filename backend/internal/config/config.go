@@ -1,10 +1,12 @@
 package config
 
 import (
+	"fmt"
 	"log"
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/spf13/viper"
 )
@@ -56,7 +58,12 @@ type AgentGatewayConfig struct {
 type Config struct {
 	Port        string `mapstructure:"PORT"`
 	DatabaseURL string `mapstructure:"DATABASE_URL"`
-	RedisURL    string `mapstructure:"REDIS_URL"`
+	// RedisURL: v2.1 F4 标注 — 当前 v1.x 不消费此配置。
+	// in-memory sync.Map 在 DAU < 5000 trial/天足够 (详见各模块注释:
+	// agent_gateway/cache.go / idempotency/idempotency.go / ratelimit/)。
+	// 触发条件: DAU > 5000 时切 Redis 替换为分布式实现。
+	// 当前保留 env 读取仅为 loadSummary 输出, 不影响行为。
+	RedisURL string `mapstructure:"REDIS_URL"`
 
 	LLMProvider string `mapstructure:"LLM_PROVIDER"`
 	LLMAPIKey   string `mapstructure:"LLM_API_KEY"`
@@ -83,6 +90,12 @@ type Config struct {
 	//   - 默认 5（测试阶段保守值;生产可调到 20）
 	//   - 0 → 禁用限流（紧急回滚用）
 	UserTrialLimit int `mapstructure:"USER_TRIAL_LIMIT"`
+
+	// AppEnv 标识当前部署环境: "dev" / "staging" / "prod"
+	// 默认 "dev"（本地开发模式 fall-back）;生产部署必须显式设 "prod"，
+	// 否则 main.go 启动 fail-fast 拦截 dev-style 配置（localhost / dev cookie）。
+	// 设计动机：2026-07 安全审计 P1-7 (AGENTS.md §6.2d 已 deferred 至 v2.4)。
+	AppEnv string `mapstructure:"APP_ENV"`
 
 	AgentGateway AgentGatewayConfig `mapstructure:",squash"`
 }
@@ -150,6 +163,11 @@ func Load() {
 		// v0.9 用户限流 (ADR 0014): 0 → 禁用限流
 		UserTrialLimit: envOrDefaultInt("USER_TRIAL_LIMIT", 5),
 
+		// v2.4 (P1-7) APP_ENV: 默认 "dev"（本地开发模式），生产部署必须显式 APP_ENV=prod，
+		// 否则 main.go 启动 fail-fast（拦截 dev-style localhost / COOKIE_SECURE=false 等）。
+		// 合法值: "dev" / "staging" / "prod"，其他 → fail-fast 启动拒绝。
+		AppEnv: envOrDefaultString("APP_ENV", "dev"),
+
 		// Agent Gateway 22 个 env
 		AgentGateway: AgentGatewayConfig{
 			Enabled:              envOrDefaultBool("AGENT_GATEWAY_ENABLED", false),
@@ -167,20 +185,24 @@ func Load() {
 			RejectWhenExhausted:    envOrDefaultBool("AGENT_GATEWAY_REJECT_WHEN_EXHAUSTED", true),
 			BudgetSlidingWindowSec:  envOrDefaultInt("AGENT_GATEWAY_BUDGET_SLIDING_WINDOW_SEC", 300),
 
-			// Prompt Compression v2
-			SmartCompression:       envOrDefaultBool("AGENT_GATEWAY_SMART_COMPRESSION", false),
+			// v2.1 F5: 三个 ADR 0013 能力默认全开 (本地开发模式验证可用性)
+//   - SmartCompression: v2 评分压缩器 (pipeline: 评分 / 原子组 / 贪心)
+//   - CacheEnabled: in-memory LRU + TTL 响应缓存 (5min TTL, 10000 上限)
+//   - BreakerEnabled: sony/gobreaker 三态熔断 + keyword fallback
+// 回滚: .env 设 AGENT_GATEWAY_SMART_COMPRESSION=false 等即可 (无需重编译)
+SmartCompression:       envOrDefaultBool("AGENT_GATEWAY_SMART_COMPRESSION", true),
 			KeepRecentForcedN:      envOrDefaultInt("AGENT_GATEWAY_KEEP_RECENT_FORCED_N", 3),
 			SummaryInsertThreshold: envOrDefaultInt("AGENT_GATEWAY_SUMMARY_INSERT_THRESHOLD", 5),
 			ScoreThreshold:         envOrDefaultFloat("AGENT_GATEWAY_SCORE_THRESHOLD", 0.3),
 
-			// v0.9 三大新能力 (ADR 0013)
-			LLMTimeoutSec:  envOrDefaultInt("AGENT_GATEWAY_LLM_TIMEOUT_SEC", 90),
-			CacheEnabled:   envOrDefaultBool("AGENT_GATEWAY_CACHE_ENABLED", false),
-			CacheTTLSec:    envOrDefaultInt("AGENT_GATEWAY_CACHE_TTL_SEC", 300),
+			// v0.9 三大新能力 (ADR 0013) — v2.1 F5 默认全开
+			LLMTimeoutSec:   envOrDefaultInt("AGENT_GATEWAY_LLM_TIMEOUT_SEC", 90),
+			CacheEnabled:    envOrDefaultBool("AGENT_GATEWAY_CACHE_ENABLED", true),
+			CacheTTLSec:     envOrDefaultInt("AGENT_GATEWAY_CACHE_TTL_SEC", 300),
 			CacheMaxEntries: envOrDefaultInt("AGENT_GATEWAY_CACHE_MAX_ENTRIES", 10000),
 
-			// Circuit Breaker
-			BreakerEnabled:             envOrDefaultBool("AGENT_GATEWAY_BREAKER_ENABLED", false),
+			// Circuit Breaker — v2.1 F5 默认全开 (本地开发模式验证可用性)
+			BreakerEnabled:             envOrDefaultBool("AGENT_GATEWAY_BREAKER_ENABLED", true),
 			BreakerFailureRatio:        envOrDefaultFloat("AGENT_GATEWAY_BREAKER_FAILURE_RATIO", 0.5),
 			BreakerMinRequests:         envOrDefaultInt("AGENT_GATEWAY_BREAKER_MIN_REQUESTS", 10),
 			BreakerOpenTimeoutSec:      envOrDefaultInt("AGENT_GATEWAY_BREAKER_OPEN_TIMEOUT_SEC", 30),
@@ -268,4 +290,40 @@ func getProjectRoot() string {
 		dir = parent
 	}
 	return filepath.Dir(dir)
+}
+
+// IsDev returns true if APP_ENV is "dev" or empty (本地开发模式默认)。
+// 用于 UserFacingError.WithDetail 等需要在 prod 隐藏细节的判断点。
+func (c Config) IsDev() bool {
+	e := strings.ToLower(strings.TrimSpace(c.AppEnv))
+	return e == "" || e == "dev"
+}
+
+// IsProd returns true if APP_ENV is "prod"。
+// 用于 main.go 启动 fail-fast 检查（拦截 dev-style localhost / COOKIE_SECURE=false）。
+func (c Config) IsProd() bool {
+	return strings.ToLower(strings.TrimSpace(c.AppEnv)) == "prod"
+}
+
+// IsStaging returns true if APP_ENV is "staging"（预留：staging 与 prod 行为一致，
+// 但 ops 可在 staging 放宽某项 fail-fast 检查）。
+func (c Config) IsStaging() bool {
+	return strings.ToLower(strings.TrimSpace(c.AppEnv)) == "staging"
+}
+
+// IsProdLike returns true if 是 prod 或 staging（fail-fast 用）。
+func (c Config) IsProdLike() bool {
+	return c.IsProd() || c.IsStaging()
+}
+
+// ValidateAppEnv 在 Load() 末尾调用一次：APP_ENV 必须是 dev/staging/prod 之一，
+// 否则启动拒绝。设计动机：避免"用户拼错 APP_ENV=Production"这种 silent miss。
+func ValidateAppEnv() error {
+	e := strings.ToLower(strings.TrimSpace(AppConfig.AppEnv))
+	switch e {
+	case "", "dev", "staging", "prod":
+		return nil
+	default:
+		return fmt.Errorf("invalid APP_ENV=%q (must be dev|staging|prod)", AppConfig.AppEnv)
+	}
 }

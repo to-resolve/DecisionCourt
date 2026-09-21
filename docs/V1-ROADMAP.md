@@ -12,7 +12,7 @@
 
 ---
 
-## 0. 当前进度快照（2026-08-21）
+## 0. 当前进度快照（2026-09-14）
 
 | 维度 | 状态 | 说明 |
 |---|---|---|
@@ -29,18 +29,58 @@
 | **v1.0.4 PR-C4** | ✅ | release notes + ADR 0033 + V1-ROADMAP 同步（`726af6e`） |
 | **v2.0 PR-D1+D2** | ✅ | 厕所标识剪影小人 SVG + AgentAvatar 接入 + 5 sub-test (`50e1746`) |
 | **v2.0 PR-D3** | ✅ | release notes + ADR 0034 + V1-ROADMAP 同步（`c78182f` → `6e0588b`）|
-| **v2.0 REDESIGN 文档** | ✅ | 用户反馈"简陋，要重做" → r3f + drei + three-pathfinding 重构计划（[V2.0-REDESIGN-PLAN.md](./V2.0-REDESIGN-PLAN.md) + 4 stage 文档 + ADR 0034-supersede）|
-| **ArgumentMap 移除** | ✅ | ADR 0032 + `16332aa`，用户反馈"完全没用" |
-| **dozzle 移除** | ✅ | `29daff0`，Windows Docker Desktop npipe 不兼容 |
-| **D2 + D3 修复** | ✅ | `694a89e`，cross-exam silent error + 直接判决 fallback "共 0 轮" |
-| ADR 累计 | 35 | 含 0031 + 0032 + 0033 + 0034 (Superseded) + 0034-supersede |
-| Go 测试 | ~326 sub-test | v1.0.3 304 + PR-C1 20 + v1.0-patch 2 (streamedFallback) |
-| Frontend 测试 | 90 (7 .test.ts) | v1.0.4 79 + v2.0 5 + v1.0-patch 6 (trialHistory 2 + BeliefDiffCard 2 + websocket 2) |
+| **v2.1 F1** | ✅ | JudgeBiasMeter 冲击波位置修复（视觉 bug, 跟随 targetPosition）|
+| **v2.1 F2** | ✅ | TrialReplay phaseBelief 按 phase 过滤（UI 逻辑 bug, 三层 fallback）|
+| **v2.1 F3** | ✅ | isJudging 死代码清理 + ADR 0035（5 组件 prop 删除, judgeVariant 保留）|
+| **v2.1 F4** | ✅ | LLM_API_KEY 启动检测 + /health/llm + 前端 banner（AGENTS.md §8 红线遵守）|
+| **v2.1 F5** | ✅ | 三个默认开关全开（smart_compression / cache / breaker, .env=false 回滚）|
+| **v2.1 F6** | ✅ | release notes + V1-ROADMAP + SWITCH-SOAK.md + ADR 0035 README 索引 |
+| **v2.1 F7** | ✅ | DotAvatar 视觉优化 + 庭审中央案卷化（scene-shell / 装订线 / 印章 / 天平）|
+| **v2.1** | ✅ | v2.1 tag 推送（7 commit `a6d2d5e..d6a9fd3`）|
+| **v2.2 P0-1** | ✅ | 气泡绝对定位（庭审横向滑动修复）|
+| **v2.2 P0-2** | ✅ | 全局隐藏 scrollbar（庭审滑块丑修复）|
+| **v2.2 P0-3** | ✅ | EvidenceBoard 改 grid wrap（跟全局隐藏 scrollbar 一致）|
+| **v2.2 P0-4** | ✅ | 庭审记录文字渲染修复（MessageHistory + TrialReplay + RebuttalTraceNode）|
+| **v2.2 P0-5** | ✅ | TrialHistoryList 防撑宽 + lucide Scale 图标一致化 |
+| **v2.2 P0-6** | ✅ | dev compose Next.js rewrites（前端 404 修复）|
+| **v2.2 P0-7** | ✅ | 整个页面 h-screen 100vh（庭审记录面板高度修复）|
+| **v2.2** | ✅ | v2.2 推送（9 commit `88a3716..ec46438`）|
+| **AGENTS.md §11** | ✅ | Docker 业务测试规范（DOCKER_TEST_POLICY）|
+| **v2.3 observability-impl** | ✅ | agent_gateway 全量 metrics 注入骨架（Gateway / cache / breaker / compressor / throttler / budget / retryer 7 文件构造器加 metrics 参数；nil-safe）|
+| **v2.3 observability-gateway** | ✅ | gateway.go 加埋点（call_total / tokens / duration / cache_put / stream / budget_rejected）|
+| **v2.3 observability-cache** | ✅ | cache.go 加埋点（hit / miss / put{insert,update} / evict{lru,session} / size gauge）|
+| **v2.3 observability-breaker** | ✅ | breaker.go 加埋点（state_change{from,to} / state gauge / fallback{reason}）|
+| **v2.3 observability-compressor** | ✅ | prompt_compressor.go 加埋点（ratio / duration / summary_inserted + skipped_normal 路径）|
+| **v2.3 observability-throttler-budget-retryer** | ✅ | throttler / token_budget / retryer 3 文件加埋点 |
+| **v2.3 observability-tests** | ✅ | metrics_test.go 9 个新 sub-test（cache / breaker / compressor / throttler / retryer / gateway E2E / nil safe / budget）|
+| **v2.3 docs** | ✅ | ADR 0037 + release-notes/v2.3 + SWITCH-SOAK.md §2 表格对齐 + 端口冲突文档清理 + AGENTS.md §11.7 curl 中文乱码排查 |
+| **v2.4 P1-7** | ✅ | config.AppEnv + IsDev/IsProd/ValidateAppEnv + main.go enforceProdInvariants (4 条 invariant) |
+| **v2.4 P1-5** | ✅ | UserFacingError.WithDetail 加 prod 守卫 (dev 保留 / prod 清空) |
+| **v2.4 P1-3** | ✅ | websocket SetReadLimit(64KB) + content length check(4096 chars 与 HTTP 对齐) |
+| **v2.4 tests+docs** | ✅ | 14 个新 sub-test (config / cmd / courtroom / api) + ADR 0038 + release-notes/v2.4 + deferred-items §D1 更新 |
+| **v2.5 P1-6** | ✅ | frontend 22 依赖 pin 精确版本 + .npmrc save-exact + CI govulncheck/npm audit job |
+| **v2.5 P1-2** | ✅ | CSRF double-submit cookie 中间件 (手写, 不引入 gorilla/csrf) + 前端 fetchJson 自动注入 header |
+| **v2.5 P1-4** | ✅ | sanitize.go (21 中英文 injection pattern) + 9 个 prompt 函数适配 + orchestrator 6 处 + react_runner 2 处 |
+| **v2.5 tests+docs** | ✅ | 22 个新 sub-test (csrf 10 + sanitize 12) + ADR 0039 + release-notes/v2.5 + deferred §D1 全部 P1 done |
+| **v2.6 D2+D3** | ✅ | silent error 黑洞 D2 收尾（streamSpeakContent 三处 WARN + saveAgentMessage 拦截 + 6 处 caller skip broadcast）+ direct_verdict fallback round D3（transitionPhase 保留 round + maxRound helper）+ 9 个新 sub-test + ADR 0040 + release-notes/v2.6 + deferred-items-2026-08-21 §D2+§D3 ✅ + 删孤儿分支 `fix/cross-exam-content-empty` |
+| ADR 累计 | 40 | 含 0031 + 0032 + 0033 + 0034 (Superseded) + 0034-supersede (Archived) + 0034-archive (✅) + 0037 agent-gateway-observability + 0038 security-p1-batch-a + 0039 security-p1-batch-c + **0040 silent-error-d2-d3-closeout** |
+| Go 测试 | ~386 sub-test | v1.0.3 304 + PR-C1 20 + v1.0-patch 2 (streamedFallback) + v2.1 F4+F5 6 + v2.3 observability-tests 9 + v2.4 P1-tests 14 + v2.5 P1-tests 22 + **v2.6 D2+D3 9** |
+| Frontend 测试 | 103 (9 .test.ts) | v1.0.4 79 + v2.0 5 + v1.0-patch 6 + **v2.1 F1+F2+F3+F4 11** + **v2.2 2** |
 | 部署目标 | ⏸ 本地 dev | ECS 2026-08-05 终止,转入个人长期本地开发模式 |
 
 **v1.0-patch 系列**（2026-08-22~23，7 commit `d72f860..f3a93e0`）：浏览器 back bug / 历史庭审回看 / 跨 session 证据污染 / hydrate 补 messages / BeliefDiffCard 渲染崩溃 / WS 断连 toast / 质证 empty content 软降级。详见 [todo/bugfix-log-2026-08-23.md](./todo/bugfix-log-2026-08-23.md)。
 
-**当前阻塞**：⏸ **3 个未解决问题**（策略笔记 U1/U2/U3，见 [todo/bugfix-log-2026-08-23.md §二](./todo/bugfix-log-2026-08-23.md)）—— 判决书/历史庭审策略笔记为空 + 点击渲染出错。根因已定位（hydrate memory 映射读错字段层级），待下次 session 修复。修复后再决策 v2.0 REDESIGN 阶段 1（PR-D1）启动。
+**v1.0-patch Round 2**（2026-08-23，5 commit `647a5dc..4c8e9f6`，合计 13 commit 含 Round 1）：
+- `647a5dc` U1/U2/U3 策略笔记 hydrate 字段映射错误（Round 1 已修）
+- `9353100` PR-C1 trace store 注入（v1.0.4 历史漏注）+ saveAgentMessage empty content guard + UTF-8 repro test
+- `b705597` TrialReplay render-body setState 反模式修复 + TraceRun 类型补 input/output/tags
+- `9e80521` CourtroomScene 返回首页按钮 + verdict 回庭审跳转显式化（用户反馈"庭审回访按钮全是 bug"）
+- `ef79bda` TrialHistoryList 配色修正 + 新建庭审按钮 + 切 trial reset
+- `4c8e9f6` BeliefDiffTimeline/RebuttalTraceNode mock 数据 + traceStore nil fail-fast
+- (本 commit): 文档同步
+详情见 [todo/bugfix-log-2026-08-23.md §F8-F12](./todo/bugfix-log-2026-08-23.md)。
+
+**当前阻塞**：✅ Round 1/2 共 12 个 bug 全修（8 个 v1.0-patch + 4 个 Round 2 高优）。剩余 deferred：D1 安全审计 P1-P3（用户授权启动）+ M5 v3.0 端侧 TTS / v2.0 REDESIGN（用户 2026-08-23 确认不启动）。D2 + D3 已于 v2.6 收尾（ADR 0040）。
 
 ---
 
@@ -248,7 +288,7 @@ M6 v1.2 ⏸ (安全 P1, 触发后启动)
 | v2.0 多模态投入过大 | 项目方向漂移 | 远期参考，不绑定触发条件 |
 | ArgumentMap 类 UI 组件"用户根本不会看" | 浪费开发资源 | 用户反馈驱动（ADR 0032 教训） |
 | Dev compose 启动配置脆弱（DATABASE_URL 拼接 / NEXT_PUBLIC_* 覆盖 / Windows npipe） | Windows / Linux 切换困难 | 文档化 + 简化为hardcode；回归测试（agent_dev compose E2E）|
-| Silent error 黑洞（react_runner 流式解析 silent fail） | 庭审记录全空但不报错 | D2 fix (`694a89e`) 加 WARN 日志 + 拦截；D3 fix 同 commit |
+| Silent error 黑洞（react_runner 流式解析 silent fail） | 庭审记录全空但不报错 | D2 + D3 fix（v2.6, ADR 0040）加 WARN 日志 + saveAgentMessage 拦截 + 6 处 caller skip broadcast + maxRound helper |
 
 ---
 
@@ -265,7 +305,7 @@ M6 v1.2 ⏸ (安全 P1, 触发后启动)
 
 ### 持续维护
 
-- **静默错误黑洞回归测试护栏**（v1.0.0 PR-3 框架 + D2/D3 9 sub-test 在 `694a89e`）
+- **静默错误黑洞回归测试护栏**（v1.0.0 PR-3 框架 + D2/D3 9 sub-test 在 v2.6 ADR 0040）
 - **DeepSeek API 文档变更跟进**（ADR 0029 教训）
 - **Dev compose 回归测试**（host 端口冲突 + env 优先级 + Windows npipe）
 - **AGENTS.md §8 敏感文件红线**（项目长期规范）

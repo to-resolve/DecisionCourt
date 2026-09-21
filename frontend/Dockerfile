@@ -14,17 +14,9 @@ FROM node:20-alpine AS deps
 # pnpm-lock.yaml 是 lockfileVersion: 9.0,只支持 pnpm 9.x
 # corepack pnpm@latest 装到 11.x 会撞 ERR_UNKNOWN_BUILTIN_MODULE
 RUN corepack enable && corepack prepare pnpm@9.15.4 --activate
-# 国内构建优化:npm/pnpm 走 npmmirror(淘宝源),避免 registry.npmjs.org 超时
-# (npm_config_registry 是 npm 系工具通用的环境变量,pnpm 同样认)
-ENV npm_config_registry=https://registry.npmmirror.com
-# 网络抖动加固:失败重试 5 次 + 拉长重试间隔(默认重试次数少,抖动网络下容易整批挂)
-ENV npm_config_fetch_retries=5
-ENV npm_config_fetch_retry_mintimeout=10000
-ENV npm_config_fetch_retry_maxtimeout=120000
 WORKDIR /app
 COPY package.json pnpm-lock.yaml ./
-# --network-concurrency 8:默认 16 并发,抖动的 Wi-Fi 下并发越高越容易触发 TCP reset
-RUN pnpm install --frozen-lockfile --network-concurrency 8
+RUN pnpm install --frozen-lockfile
 
 # ============= builder stage =============
 FROM node:20-alpine AS builder

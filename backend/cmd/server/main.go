@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"log"
 	"log/slog"
 	"net/http"
@@ -27,6 +29,7 @@ import (
 	"github.com/decisioncourt/backend/internal/observability"
 	"github.com/decisioncourt/backend/internal/private_memory"
 	"github.com/decisioncourt/backend/internal/promptlab"
+	"github.com/decisioncourt/backend/internal/trace"
 	"github.com/decisioncourt/backend/internal/search"
 	"github.com/decisioncourt/backend/internal/util"
 	"github.com/gin-contrib/cors"
@@ -43,6 +46,12 @@ var version = "dev"
 func main() {
 	config.Load()
 
+	// v2.4 (P1-7) APP_ENV fail-fast: dev/staging/prod 之外的拼写错误 → 立即退出。
+	// 防止 prod 部署误配 APP_ENV=Production / production 等 silent miss。
+	if err := config.ValidateAppEnv(); err != nil {
+		log.Fatalf("config: %v", err)
+	}
+
 	// v0.8 白盒化：用 slog JSON handler 替换默认 logger。所有 log.Printf
 	// 在 main / api / agent_gateway 后续被替换为 observability.Logger(ctx)。
 	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{
@@ -53,14 +62,30 @@ func main() {
 	// 白盒化：进程级 metrics 实例（线程安全的内存实现）。
 	metrics := observability.NewMetrics()
 
+	// v2.4 (P1-7) prod-style 启动 invariant 检查（fail-fast）。
+	// 拦截 dev-mode 配置被误部署到 prod（localhost origin / COOKIE_SECURE=false）。
+	if config.AppConfig.IsProdLike() {
+		if err := enforceProdInvariants(); err != nil {
+			log.Fatalf("prod invariant failed: %v", err)
+		}
+	}
+
 	if err := model.Connect(); err != nil {
 		log.Fatalf("database connection failed: %v", err)
 	}
 
 	llmClient, err := llm.NewClient()
 	if err != nil {
-		log.Printf("warning: LLM client not initialized: %v", err)
-		log.Println("courtroom service will not be available until LLM_API_KEY is set")
+		// v2.1 F4: 静默启动修复 — 升级 warn → ERROR + 染色 banner
+		slog.Error("LLM client not initialized — courtroom disabled",
+			"error", err,
+			"help", "set LLM_API_KEY in .env (see .env.example)",
+		)
+		// 染色 banner 绕过 JSON handler, 用户启动时一眼能看到
+		fmt.Fprintln(os.Stderr, "")
+		fmt.Fprintln(os.Stderr, "\x1b[31m[FATAL-LITE] LLM_API_KEY not set.\x1b[0m")
+		fmt.Fprintln(os.Stderr, "\x1b[33m          Courtroom service is disabled until LLM_API_KEY is configured.\x1b[0m")
+		fmt.Fprintln(os.Stderr, "\x1b[33m          See .env.example for setup instructions.\x1b[0m")
 	}
 
 	// Agent Gateway 白盒子集：把所有 LLM 调用过 Recorder，写入
@@ -96,7 +121,7 @@ func main() {
 		SummaryInsertThreshold: config.AppConfig.AgentGateway.SummaryInsertThreshold,
 		ScoreThreshold:         config.AppConfig.AgentGateway.ScoreThreshold,
 	}
-	gatewayClient := agent_gateway.NewWithConfig(llmClient, recorder, defaultModel, gatewayCfg)
+	gatewayClient := agent_gateway.NewWithConfig(llmClient, recorder, defaultModel, gatewayCfg, metrics)
 
 	// v0.8 白盒化：把 metrics + GormEventRecorder 注入到 gatewayClient 装饰器层，
 	// 让所有 LLM 调用的指标自动归集到 metrics，业务级 span 自动写入 decision_events。
@@ -156,7 +181,23 @@ func main() {
 
 	orchestrator := agent.NewOrchestrator(gatewayClient, bus, memRepo, nil, nil)
 	evidenceSvc := evidence.NewService(model.DB, gatewayClient)
-	searcher, _ := search.NewProvider(config.AppConfig.SearchProvider, config.AppConfig.BochaAPIKey)
+
+	// v2.1 F4: search provider 启动检测。未实现的 provider 输出明确错误
+	// 而非静默走 mock (用户配错时不会感知)。
+	searcher, err := search.NewProvider(config.AppConfig.SearchProvider, config.AppConfig.BochaAPIKey)
+	if err != nil {
+		if errors.Is(err, search.ErrProviderNotImplemented) {
+			slog.Error("search provider not implemented",
+				"provider", config.AppConfig.SearchProvider,
+				"supported", []string{"mock", "bocha"})
+			// 不 log.Fatalf: 让用户能在前端看到警告后改 .env 重启
+			// 暂时回退到 mock 避免服务起不来
+			searcher = search.NewMockProvider()
+		} else {
+			slog.Error("search provider init failed", "error", err, "provider", config.AppConfig.SearchProvider)
+			searcher = search.NewMockProvider()
+		}
+	}
 
 	courtroomSvc := courtroom.NewService(model.DB, orchestrator, evidenceSvc, searcher, bus, hub.Broadcast)
 	// v0.10.23 候选 2: 注入 HistoryProvider, 让 orchestrator 拉同 agent 历史发言
@@ -183,6 +224,19 @@ func main() {
 	handler.WithMetrics(metrics)
 	// v0.10 前端埋点 (ADR 0020)：复用同一个 eventRecorder,前端事件落同一张表。
 	handler.WithEventRecorder(eventRecorder)
+
+	// v1.0.4 PR-C1 (修复): 注入 trace.Store 让 /api/v1/courtrooms/:uuid/traces 路由可注册。
+	// 之前 PR-C1 在 handler 侧加了 traceStore 字段 + RegisterTraceRoutes,
+	// 但 main.go 忘了 NewFileTraceStore 注入, 导致 handler.traceStore == nil,
+	// RegisterTraceRoutes(nil) 静默 return, /traces 端点从未注册 → 404。
+	// 复用 AGENT_GATEWAY_LOG_DIR (与 agent_gateway.FileLogger 同目录),
+	// 单文件 LRU 100 entries 缓存 (FileTraceStore 默认)。
+	traceLogDir := os.Getenv("AGENT_GATEWAY_LOG_DIR")
+	if traceLogDir == "" {
+		traceLogDir = "logs"
+	}
+	handler.WithTraceStore(trace.NewFileTraceStore(traceLogDir))
+	slog.Info("trace store enabled", "log_dir", traceLogDir, "type", "FileTraceStore")
 
 	// v0.9 (ADR 0014): 每用户每天 N 次 StartTrial 限流(防弱网/脚本刷 trial 烧 LLM 配额)。
 	// 默认 5 次/24h,可通过 USER_TRIAL_LIMIT 环境变量调整;置 0 禁用。
@@ -259,6 +313,10 @@ func main() {
 		},
 	})
 	authedGroup.Use(auth.Middleware(config.AppConfig.JWTSecret))
+	// v2.5 (P1-2) CSRF Token 中间件 (double-submit cookie 模式)。
+	// 必须在 auth 之后挂（需从 ctx 取 viewer_id 签 token）。
+	// Cookie 复用 JWT_SECRET 作 HMAC key（不新增 env）。
+	authedGroup.Use(middleware.CSRF(middleware.DefaultCSRFConfig([]byte(config.AppConfig.JWTSecret))))
 	handler.RegisterAPIRoutes(authedGroup)
 
 	handler.RegisterRoutes(r) // 注册 /health 到 r
@@ -498,4 +556,49 @@ func clearSessionCookie(c *gin.Context, cfg config.Config) {
 		cfg.CookieSecure,
 		true,
 	)
+}
+
+// enforceProdInvariants (v2.4 P1-7) 在 APP_ENV=prod|staging 时拦截 dev-style 误配置。
+//
+// 设计动机：2026-07 安全审计发现 dev compose 的 fallback（localhost origin /
+// COOKIE_SECURE=false）可能被误部署到公网，导致 session cookie 不加密传输 +
+// CORS 接受任意 localhost 反射 → session hijack。
+//
+// 检查项：
+//   - ALLOWED_ORIGINS 不能含 localhost / 127.0.0.1（dev fallback）
+//   - COOKIE_SECURE 必须 = true（dev 默认 false）
+//   - JWT_SECRET 长度 ≥ 32（避免 dev 默认 weak secret 被误用）
+//   - LLM_API_KEY 必须非空（避免 dev 模式空 key 漏到 prod）
+//
+// 单测：cmd/server/prod_invariants_test.go 覆盖每条规则。
+func enforceProdInvariants() error {
+	cfg := config.AppConfig
+
+	// 1. ALLOWED_ORIGINS 不含 dev-style host
+	for _, origin := range cfg.AllowedOrigins {
+		low := strings.ToLower(origin)
+		if strings.Contains(low, "localhost") || strings.Contains(low, "127.0.0.1") {
+			return fmt.Errorf("ALLOWED_ORIGINS=%q contains dev-style host; must be a real production domain (e.g. https://yourdomain.com)", origin)
+		}
+	}
+	if len(cfg.AllowedOrigins) == 0 {
+		return fmt.Errorf("ALLOWED_ORIGINS is empty in prod; must list production domains explicitly")
+	}
+
+	// 2. COOKIE_SECURE 必须 true
+	if !cfg.CookieSecure {
+		return fmt.Errorf("COOKIE_SECURE=false in prod; must be true so session cookie is sent over HTTPS only")
+	}
+
+	// 3. JWT_SECRET 长度 ≥ 32 (避免 dev 默认 weak secret 被误用)
+	if len(cfg.JWTSecret) < 32 {
+		return fmt.Errorf("JWT_SECRET length=%d < 32 in prod; generate a strong secret (>= 32 chars)", len(cfg.JWTSecret))
+	}
+
+	// 4. LLM_API_KEY 必须非空
+	if cfg.LLMAPIKey == "" {
+		return fmt.Errorf("LLM_API_KEY is empty in prod; must configure real API key")
+	}
+
+	return nil
 }
