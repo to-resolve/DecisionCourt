@@ -88,13 +88,15 @@ export function CourtroomScene({ sessionId }: CourtroomSceneProps) {
     beliefDiffs,
     convergenceInfo,
     setSession,
-    setAgents,
-    addEvidence,
+    // v2.6 sync: setAgents / addEvidence / setBeliefDiffs 三个 store action 已不被
+    // 本组件使用 —— setAgents 改为直接调 useCourtroomStore.getState().setAgents()
+    // （见 judge_update 分支，用 getState() 规避 stale closure），
+    // evidence 改为 hydrate 整体替换，belief_diffs 在本组件只读。
+    // 解构出来会触发 @typescript-eslint/no-unused-vars（配置为 error）阻断 next build。
     addMessage,
     setPendingUserAction,
     setVerdict,
     toggleRealCourthouseMode,
-    setBeliefDiffs,
     reset, // v1.0-patch-2: 返回首页按钮 + handleViewVerdict 都用
   } = useCourtroomStore();
 
@@ -204,7 +206,11 @@ export function CourtroomScene({ sessionId }: CourtroomSceneProps) {
   // WebSocket 连接 (原 useEffect 残留, 移出 try/catch 包裹)
   // eslint-disable-next-line react-hooks/exhaustive-deps
   useEffect(() => {
-    let mounted = true;
+    // v2.6 sync: 这里原本是 `let mounted = true;`，意图是防 unmount 后 setState。
+    // 但全文件对该变量只有 cleanup 里的一次赋值、没有任何读取（无 `if (!mounted)`），
+    // 守卫早已失效，ESLint 报 "assigned a value but never used"（error）阻断构建。
+    // 本次仅删除死变量，行为不变；若确实需要防 unmount 后 setState，
+    // 应在各 handler 内补 `if (!mounted) return;` —— 属行为变更，另行评估。
     const socket = createCourtWebSocket(sessionId, {
       // v0.10.17 silent-error-fix PR 3: WS 连接状态变化 → toast 反馈。
       // 之前只在 console.log 打印,用户看不到。
@@ -357,7 +363,6 @@ export function CourtroomScene({ sessionId }: CourtroomSceneProps) {
     socket.on("*", handler);
 
     return () => {
-      mounted = false;
       socket.off("*", handler);
       socket.disconnect();
     };

@@ -66,12 +66,18 @@ export async function hydrateCourtroomStore(
   const {
     setSession,
     setAgents,
-    addEvidence,
+    // v2.6 sync: addEvidence / getStoredEvidences 仍保留在 CourtroomHydrateActions
+    // 接口里（court/[id] 与 verdict/[id] 两个调用方都传），但 hydrate 的实现已改为
+    // 用 setEvidences 整体替换（见下方「跨 session 累积」注释），这两个参数不再被读取。
+    // 解构出来会触发 @typescript-eslint/no-unused-vars（配置为 error）阻断 next build，
+    // 故不再解构 —— 接口保持不变，调用方无需改动。
     setEvidences,
     setInvestigationFindings,
     setBeliefDiffs,
-    getStoredEvidences,
-    setMemoryEntries, // 保留以备 verdict page 整体替换使用, 当前 applyCourtEvent 路径走 store.appendMemoryEntry 已正确写入
+    // v2.6 sync: setMemoryEntries 不再解构。旧实现曾用它把 memory 整体覆盖，
+    // 但会在 applyCourtEvent 之后执行并以空内容覆盖正确数据（见本文件 184-194 行注释），
+    // 现在统一走 store.appendMemoryEntry 幂等追加。
+    // 接口成员保留（verdict/[id] 与 court/[id] 都还在传），调用方无需改动。
     setMessages,
     setActiveInvestigation,
   } = actions;

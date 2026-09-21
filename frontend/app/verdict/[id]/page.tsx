@@ -48,7 +48,10 @@ export default function VerdictPage() {
     (s) => s.setInvestigationFindings,
   );
   const setBeliefDiffs = useCourtroomStore((s) => s.setBeliefDiffs);
-  const storedEvidences = useCourtroomStore((s) => s.evidences);
+  // v2.6 sync: 原 `storedEvidences = useCourtroomStore((s) => s.evidences)` 已删除。
+  // 本页对该值没有任何读取 —— 属于死代码；而且它订阅了 store.evidences 全量，
+  // 会让本页在每次 evidence 变更时无谓重渲染。
+  // 保留会触发 @typescript-eslint/no-unused-vars（配置为 error）阻断 next build。
   // v0.5: pull the v0.5 episodic-memory timeline from the live courtroom
   // store. It was hydrated during the trial via a2a.message WebSocket
   // events, so the verdict page can render the full behind-the-scenes view

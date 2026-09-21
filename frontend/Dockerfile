@@ -11,15 +11,29 @@
 
 # ============= deps stage =============
 FROM node:20-alpine AS deps
+# 【本地部署适配】国内网络：默认 registry.npmjs.org 在容器内经常连不上/超时，
+# 切到 npmmirror，并放大重试次数、拉长单次重试上限、降低并发（并发过高易被限流）。
+# corepack 拉 pnpm 本身走的是它自己的 registry，用 COREPACK_NPM_REGISTRY 单独指定。
+ARG NPM_REGISTRY=https://registry.npmmirror.com
+ENV npm_config_registry=${NPM_REGISTRY}
+ENV COREPACK_NPM_REGISTRY=${NPM_REGISTRY}
 # pnpm-lock.yaml 是 lockfileVersion: 9.0,只支持 pnpm 9.x
 # corepack pnpm@latest 装到 11.x 会撞 ERR_UNKNOWN_BUILTIN_MODULE
 RUN corepack enable && corepack prepare pnpm@9.15.4 --activate
 WORKDIR /app
 COPY package.json pnpm-lock.yaml ./
-RUN pnpm install --frozen-lockfile
+RUN pnpm install --frozen-lockfile \
+        --fetch-retries=5 \
+        --fetch-retry-mintimeout=20000 \
+        --fetch-retry-maxtimeout=180000 \
+        --network-concurrency=8
 
 # ============= builder stage =============
 FROM node:20-alpine AS builder
+# 【本地部署适配】与 deps stage 一致：builder 里的 corepack prepare 也要走国内源
+ARG NPM_REGISTRY=https://registry.npmmirror.com
+ENV npm_config_registry=${NPM_REGISTRY}
+ENV COREPACK_NPM_REGISTRY=${NPM_REGISTRY}
 RUN corepack enable && corepack prepare pnpm@9.15.4 --activate
 WORKDIR /app
 COPY --from=deps /app/node_modules ./node_modules
