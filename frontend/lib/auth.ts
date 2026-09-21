@@ -2,17 +2,19 @@
 //
 // 流程：
 //   1. 浏览器首次访问 → 检查 localStorage.dc_user_id
-//   2. 不存在 → 用 crypto.randomUUID() 生成,格式: anon_<32hex>
+//   2. 不存在 → 用 uuid() 生成,格式: anon_<32hex>（见 lib/random.ts）
 //   3. 写 localStorage + localStorage.dc_user_id_created_at
 //   4. 调用 ensureAuthToken() 拿到 JWT(set cookie + 存 localStorage.dc_token 备用)
 //   5. 后续所有 API / WS 请求用 getAuthToken()
 //
 // 安全考量：
-//   - crypto.randomUUID() 是 CSPRNG,不可枚举
+//   - crypto.randomUUID() 是 CSPRNG,不可枚举（见 lib/random.ts：非安全上下文自动退化）
 //   - localStorage 不放敏感信息(只有 user_id 和 token)
 //   - token 7 天过期,过期后 ensureAuthToken() 自动续期
 //   - 跨标签页共享(同 origin 共享 localStorage)
 //   - 跨浏览器/隐身模式 = 不同 user_id(可接受,匿名身份)
+
+import { uuid } from "./random.ts";
 
 const STORAGE_KEY_UID = "dc_user_id";
 const STORAGE_KEY_UID_CREATED = "dc_user_id_created_at";
@@ -24,17 +26,24 @@ function isBrowser(): boolean {
   return typeof window !== "undefined" && typeof localStorage !== "undefined";
 }
 
-// generateUserID: 用 crypto.randomUUID() 生成符合后端白名单 [A-Za-z0-9_.-]{1,64} 的 user_id。
+// generateUserID: 生成符合后端白名单 [A-Za-z0-9_.-]{1,64} 的 user_id。
 //
 // 格式：anon_<32hex>。例: anon_3f8a91b2e4d6c5a7b9e1f0d2c4b6a8e0
 // 32 hex = 128 bit entropy,不可枚举。
+//
+// v2.6 修复（2026-09-21）：改用 lib/random.uuid() 而非直接调 crypto.randomUUID()。
+// 原因：crypto.randomUUID() 要求**安全上下文**，而本项目按「公网 IP + 端口」部署
+// （绕开 ICP 备案），`http://<IP>:8080` 既非 HTTPS 也非 localhost，于是
+// `crypto.randomUUID` 为 undefined，原实现会退化成**固定字符串 "anon_placeholder"**
+// —— 所有访客共用同一匿名身份，互相能看到对方创建的庭审（已实测复现）。
+// uuid() 在非安全上下文下自动退化为 crypto.getRandomValues()（不要求安全上下文）。
 export function generateUserID(): string {
-  if (!isBrowser() || !crypto.randomUUID) {
-    // SSR 或老浏览器：返回固定 placeholder(实际不会用,因为 ensureAuthToken 会再生成)
+  if (!isBrowser()) {
+    // SSR 阶段没有 crypto/DOM。真实身份只在浏览器里生成，
+    // 这个占位串不会被持久化（getUserID 在 SSR 时直接返回空串）。
     return "anon_placeholder";
   }
-  const uuid = crypto.randomUUID().replace(/-/g, "");
-  return `anon_${uuid}`;
+  return `anon_${uuid().replace(/-/g, "")}`;
 }
 
 // getUserID: 拿当前 user_id；不存在则生成并存 localStorage。

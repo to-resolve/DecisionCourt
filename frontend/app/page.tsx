@@ -53,6 +53,15 @@ export default function Home() {
   const [context, setContext] = useState("");
   const [mode, setMode] = useState<"quick" | "standard" | "deep">("standard");
 
+  // v2.6 修复（2026-09-21）：表单校验提示。
+  // 背景：选项 A/B 的 Label 原本写着「选填 · 不填将由 Agent 协助生成」，但后端
+  // internal/courtroom/service.go:358 明确要求二者非空
+  // （"option_a and option_b are required for MVP"），且前端 `optionA.trim() || undefined`
+  // 会让空值被 JSON.stringify 直接丢弃 → 留空提交只会拿到一句
+  // 400 "invalid request body"。UI 的后端契约描述是错的，这里改正并在前端
+  // 给出人类可读的提示，而不是把 400 原样抛给用户。
+  const [formError, setFormError] = useState<string | null>(null);
+
   // v2.1 F4: 启动时检测 backend LLM 是否配置, 未配置显示不可关闭 banner。
   // 网络错误不打扰用户 (本地 backend 未启动也常见)。
   const [llmWarning, setLlmWarning] = useState<string | null>(null);
@@ -86,16 +95,34 @@ export default function Home() {
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!title.trim()) return;
+
+    // v2.6 修复：后端强制要求 title / option_a / option_b 非空
+    // （service.go "required for MVP"）。前端就地校验，给出可读提示，
+    // 不要把 400 "invalid request body" 原样抛给用户。
+    // 注意 HTML `required` 对"纯空格"是放行的，所以这里按 trim 结果判断。
+    const t = title.trim();
+    const a = optionA.trim();
+    const b = optionB.trim();
+    if (!t) {
+      setFormError("请先填写「你的决策问题」。");
+      return;
+    }
+    if (!a || !b) {
+      setFormError(
+        "「当事人意见」的选项 A / 选项 B 都必须填写（后端立案要求两者非空）。",
+      );
+      return;
+    }
+    setFormError(null);
 
     setLoading(true);
     reset();
 
     try {
       const res = await api.createSession({
-        title: title.trim(),
-        option_a: optionA.trim() || undefined,
-        option_b: optionB.trim() || undefined,
+        title: t,
+        option_a: a,
+        option_b: b,
         context: context.trim() || undefined,
         mode,
       });
@@ -247,8 +274,8 @@ export default function Home() {
               <Label className="text-[10px] uppercase tracking-[0.2em] text-inkSoft font-data flex items-center gap-2">
                 <span className="inline-block w-3 h-px bg-defense" />当 事 人 意
                 见
-                <span className="text-[9px] text-inkFaint normal-case tracking-normal">
-                  (选填 · 不填将由 Agent 协助生成)
+                <span className="text-[9px] text-prosecution normal-case tracking-normal">
+                  (必填 · 后端立案要求选项 A/B 非空)
                 </span>
               </Label>
 
@@ -269,6 +296,7 @@ export default function Home() {
                     value={optionA}
                     onChange={(e) => setOptionA(e.target.value)}
                     className="bg-white border border-rule rounded-sm h-11 text-display"
+                    required
                   />
                 </div>
 
@@ -295,6 +323,7 @@ export default function Home() {
                     value={optionB}
                     onChange={(e) => setOptionB(e.target.value)}
                     className="bg-white border border-rule rounded-sm h-11 text-display"
+                    required
                   />
                 </div>
               </div>
@@ -312,6 +341,17 @@ export default function Home() {
                 className="bg-paper border border-rule rounded-sm min-h-[100px] resize-none text-display focus:bg-white"
               />
             </div>
+
+            {/* v2.6 修复：前端校验提示（替代把后端 400 原样抛出） */}
+            {formError && (
+              <div
+                role="alert"
+                className="border border-prosecution/40 bg-prosecution/5 text-prosecution-ink text-sm px-4 py-3 rounded-sm flex items-start gap-2"
+              >
+                <span aria-hidden>⚠</span>
+                <span>{formError}</span>
+              </div>
+            )}
 
             {/* 庭审模式选择 */}
             <div className="grid md:grid-cols-[1fr_auto] gap-5 items-end pt-2 border-t border-rule">

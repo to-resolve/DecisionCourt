@@ -6,6 +6,7 @@ import { useCourtroomStore, applyCourtEvent } from "@/store/courtroomStore";
 import { api } from "@/lib/api";
 import { createCourtWebSocket, type CourtEventHandler } from "@/lib/websocket";
 import { setGlobalWsRef } from "@/lib/wsHolder";
+import { uuid } from "@/lib/random";
 import { saveMemoryCache, loadMemoryCache } from "@/lib/memoryCache";
 import type {
   Agent,
@@ -555,7 +556,12 @@ export function CourtroomScene({ sessionId }: CourtroomSceneProps) {
                   // 的 Idempotency-Key。失败保留(用户点 retry 用同 key),
                   // 成功清掉(下次启动 trial 用新 key)。防弱网重发。
                   if (!startTrialIdempKeyRef.current) {
-                    startTrialIdempKeyRef.current = crypto.randomUUID();
+                    // v2.6 修复（2026-09-21）：不能用 crypto.randomUUID() —— 它要求
+                    // 安全上下文，本项目按「公网 IP + 端口」部署（http://<IP>:8080，
+                    // 非 HTTPS 非 localhost）时为 undefined，这里会直接抛
+                    // TypeError: crypto.randomUUID is not a function，
+                    // 导致点「开庭」连请求都发不出去。统一走 lib/random.uuid()。
+                    startTrialIdempKeyRef.current = uuid();
                   }
                   const idempKey = startTrialIdempKeyRef.current;
 

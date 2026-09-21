@@ -161,6 +161,11 @@ export interface Verdict {
 
 export interface CreateSessionRequest {
   title: string;
+  // ⚠️ v2.6 说明（2026-09-21）：真实后端**强制要求** option_a / option_b 非空
+  // （backend/internal/courtroom/service.go:358 "required for MVP"），
+  // 留空会得到 400 "invalid request body"。
+  // 这里保留 optional 标记是因为 mock 模式（lib/mock/mockApi.ts）仍支持
+  // "无选项 → clarification 阶段"的旧流程；真实链路已在 app/page.tsx 做必填校验。
   option_a?: string;
   option_b?: string;
   context?: string;
