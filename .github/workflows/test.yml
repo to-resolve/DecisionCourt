@@ -93,7 +93,23 @@ jobs:
           version: 9
 
       - name: Install dependencies
-        run: pnpm install
+        # v2.6.1（2026-09-21）：安装失败时把日志尾部以 ::error:: annotation 输出。
+        #
+        # 为什么需要这个：GitHub 的 job 日志要鉴权才能通过 API 读取
+        # （`/actions/jobs/<id>/logs` 对公开仓库也返回 403），不带 token 时
+        # **唯一能程序化读到失败原因的就是 annotation**
+        # （`/check-runs/<id>/annotations` 无需鉴权）。之前这个步骤失败后
+        # 只留下一句 "Process completed with exit code 1."，等于没有信息。
+        # 退出码原样透传，不改变失败语义。
+        run: |
+          set +e
+          pnpm install 2>&1 | tee /tmp/pnpm-install.log
+          code=${PIPESTATUS[0]}
+          if [ "$code" -ne 0 ]; then
+            esc=$(tail -c 2000 /tmp/pnpm-install.log | tr -d '\r' | sed ':a;N;$!ba;s/%/%25/g;s/\n/%0A/g')
+            echo "::error title=pnpm install failed (exit $code)::$esc"
+          fi
+          exit $code
 
       - name: Type check
         run: pnpm run tsc
@@ -167,7 +183,17 @@ jobs:
 
       - name: pnpm install (frozen lockfile)
         working-directory: ./frontend
-        run: pnpm install --frozen-lockfile
+        # 同 frontend-test 的 Install dependencies：失败时用 annotation 输出
+        # 日志尾部，因为 job 日志需要通过鉴权才能读。
+        run: |
+          set +e
+          pnpm install --frozen-lockfile 2>&1 | tee /tmp/pnpm-install-frozen.log
+          code=${PIPESTATUS[0]}
+          if [ "$code" -ne 0 ]; then
+            esc=$(tail -c 2000 /tmp/pnpm-install-frozen.log | tr -d '\r' | sed ':a;N;$!ba;s/%/%25/g;s/\n/%0A/g')
+            echo "::error title=pnpm install --frozen-lockfile failed (exit $code)::$esc"
+          fi
+          exit $code
 
       - name: pnpm audit (high+)
         # v2.5 (P1-6): audit-level=high 阻塞 high+critical 漏洞。
