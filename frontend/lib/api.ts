@@ -12,6 +12,7 @@ import type {
 } from "@/types";
 import { mockApi } from "./mock/mockApi";
 import { ensureAuthToken, getAuthToken } from "./auth";
+import { csrfHeaders } from "./csrf.ts";
 // eslint-disable-next-line @typescript-eslint/no-unused-vars
 import { ApiError, handleApiError } from "./errorBus";
 
@@ -222,25 +223,9 @@ export const api = {
         >(`/api/v1/courtrooms/${sessionUUID}/memory`),
 };
 
-// v2.5 (P1-2) CSRF cookie 名（与 backend middleware.CSRF 的 CookieName 对齐）。
-// 后端 GET 自动 Set-Cookie，前端 POST 时必须把 cookie value 复制到 header。
-const CSRF_COOKIE_NAME = "XSRF-TOKEN";
-const CSRF_HEADER_NAME = "X-XSRF-TOKEN";
-
-// v2.5 (P1-2) 读 cookie 的 helper（document.cookie only-readable）。
-function readCookie(name: string): string | null {
-  if (typeof document === "undefined") return null; // SSR safe
-  const target = `${name}=`;
-  const parts = document.cookie.split(";");
-  for (const p of parts) {
-    const trimmed = p.trim();
-    if (trimmed.startsWith(target)) {
-      return decodeURIComponent(trimmed.slice(target.length));
-    }
-  }
-  return null;
-}
-
+// v2.5 (P1-2) CSRF：常量与 readCookie 已收敛到 lib/csrf.ts，与
+// lib/transport.ts（埋点上报）共用同一实现，避免"只改一处导致另一处漏带
+// header"的历史问题（详见 lib/csrf.ts 文件头）。
 async function fetchJson<Req, Res>(
   path: string,
   body?: Req,
@@ -263,17 +248,12 @@ async function fetchJson<Req, Res>(
   if (idempotencyKey) {
     headers["Idempotency-Key"] = idempotencyKey;
   }
-  // v2.5 (P1-2): 对 POST/PUT/DELETE 自动注入 X-XSRF-TOKEN header
-  // (从 XSRF-TOKEN cookie 复制)。GET 由后端自动 issue cookie,无需手动。
   const httpMethod = method || (body ? "POST" : "GET");
-  if (httpMethod !== "GET" && httpMethod !== "HEAD" && httpMethod !== "OPTIONS") {
-    const csrfToken = readCookie(CSRF_COOKIE_NAME);
-    if (csrfToken) {
-      headers[CSRF_HEADER_NAME] = csrfToken;
-    }
-    // 没拿到 CSRF cookie 不在这里报错 — 后端会回 403 让 fetchJson 抛错,
-    // 由前端 errorBus 显示"CSRF cookie missing; reload the page"提示用户刷新。
-  }
+  // v2.5 (P1-2): 对 POST/PUT/DELETE 自动注入 X-XSRF-TOKEN header
+  // (从 XSRF-TOKEN cookie 复制)。GET 由后端自动 issue cookie，无需手动。
+  // 没拿到 CSRF cookie 时 csrfHeaders 返回 {} — 不在这里报错，后端会回 403
+  // 让 fetchJson 抛错，由前端 errorBus 显示"CSRF cookie missing"提示用户刷新。
+  Object.assign(headers, csrfHeaders(httpMethod));
   const res = await fetch(`${baseUrl}${path}`, {
     method: httpMethod,
     headers,

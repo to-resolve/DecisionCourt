@@ -12,11 +12,27 @@
 // 或 cookie 鉴权。参考 lib/api.ts:fetchJson() 的做法(ensureAuthToken +
 // Authorization Bearer + credentials: include)。
 //
+// v2.6.1 修复（2026-09-21）：默认 fetcher 还必须带 CSRF header,否则 backend
+// /events 返回 **403 CSRF_TOKEN_MISMATCH**。
+//
+// 根因：CSRF 双提交 cookie 模式是 v2.5 引入的,当时只改了 lib/api.ts:fetchJson;
+// 本文件的 fetcher 有**自己独立的 fetch**,只抄了 Authorization 没过抄
+// X-XSRF-TOKEN → 线上每一次埋点上报都 403,并且因为失败会回填队列重试,
+// 形成"每 5s 一次持续 403"的噪声（实测一次开庭产生 15+ 条）。
+//
+// 现在统一走 lib/csrf.ts:csrfHeaders(),不再各自实现。**新增自定义 fetch 时
+// 请同样复用该模块,不要自己再读一遍 cookie。**
+//
 // 与后端契约：
 //   POST {baseUrl}/api/v1/courtrooms/{session_uuid}/events
 //   body: 单个事件（非数组;后端 handler 一次收一个事件）
 //
 // SSR safety：所有 API 都检查 window/useMock,服务端渲染时全部 noop。
+
+// csrfHeaders 是 SSR-safe 的（内部检查 typeof document），可以静态 import。
+// 注意带 `.ts` 扩展名：Node 内置 test runner 直接跑源码（--experimental-strip-types）
+// 时 ESM 解析要求显式扩展名，与 auth.ts 引 ./random.ts 的约定一致。
+import { csrfHeaders } from "./csrf.ts";
 
 // ============== 类型 ==============
 
@@ -291,6 +307,10 @@ export function defaultDeps(batchIntervalMs: number = DEFAULT_BATCH_INTERVAL_MS)
       if (token) {
         authHeaders["Authorization"] = `Bearer ${token}`;
       }
+      // v2.6.1：埋点固定走 POST，必须补 CSRF header（见文件头注释）。
+      // 读不到 XSRF-TOKEN 时 csrfHeaders 返回 {}，后端会回 403 —— 这是有意的
+      // 显式失败，不要在这里静默吞掉，否则问题会退化成"埋点永远丢数据"。
+      Object.assign(authHeaders, csrfHeaders("POST"));
 
       const res = await fetch(url, {
         method: "POST",

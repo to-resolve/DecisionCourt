@@ -49,9 +49,10 @@
 | [0035](./0035-judge-does-not-speak.md) | **法官不发言：v2.1 isJudging 死代码清理 + 保留未来启用能力** | ✅ | `frontend/components/courtroom/AgentAvatar.tsx` + `RoleSilhouette.tsx` + `DotAvatar.tsx` + `Silhouette.tsx` + `AvatarAnimations.tsx`（删 isJudging prop + 保留 judgeVariant / silhouette-gavel / dot-judge-shock CSS 资产） |
 | [0041](./0041-csrf-cookie-path-fix.md) | **CSRF Token Cookie 的 Path 必须为 `/`（修复"点立案开庭 100% 403"）** | ✅ | `backend/internal/middleware/csrf.go`（`CookiePath` 1 行）+ `csrf_test.go`（新增 2 个回归测试） |
 | [0042](./0042-secure-context-random-id.md) | **纯 HTTP 部署（非安全上下文）下的随机数与匿名身份（修复"开庭 TypeError" + 匿名身份塌缩导致数据串号）** | ✅ | `frontend/lib/random.ts` (NEW) + `lib/auth.ts` + `components/courtroom/CourtroomScene.tsx` + `lib/random.test.ts`/`lib/auth.test.ts` (NEW) |
+| [0043](./0043-csrf-header-single-source.md) | **埋点上报漏带 CSRF header —— CSRF 拼装逻辑收敛为单一入口（修复"每轮开庭 15+ 次 `/events` 403"）** | ✅ | `frontend/lib/csrf.ts` (NEW) + `lib/transport.ts` + `lib/api.ts` + `lib/csrf.test.ts` (NEW) + `frontend/package.json` + `.github/workflows/test.yml`（另修 `doc-links` 漏写 job ID + 前端测试改 glob） |
 
 > ⚠️ **索引缺口（2026-09-21 发现）**：0037 / 0038 / 0039 / 0040 四份 ADR 已存在但未登记到本索引。
-> 本次仅补登 0041（新增者），未回填历史条目——回填需逐份核对内容，另行处理。
+> 本次仅补登 0041 / 0042 / 0043（新增者），未回填历史条目——回填需逐份核对内容，另行处理。
 
 ---
 

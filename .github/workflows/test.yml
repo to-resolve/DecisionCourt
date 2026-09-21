@@ -101,12 +101,15 @@ jobs:
       - name: Unit tests
         # v0.10.9 踩过 yaml 多行 \ 续行的坑:yaml 保留 \ 后的换行 + 缩进空格,
         # shell 看到的文件名带前导空格, node --test 找不到。改 block scalar |。
+        #
+        # v2.6.1（2026-09-21）：从"硬编码文件清单"改为 glob。
+        # 原清单只列了 4 个文件，于是 lib/auth.test.ts、lib/random.test.ts、
+        # lib/csrf.test.ts 这些**后来新增的回归护栏在 CI 里从来没跑过** ——
+        # 护栏写了不等于生效，这是最隐蔽的一种失效。glob 让新增的
+        # *.test.ts 自动纳入（引号必须保留：交给 Node 自己做 `**` 展开，
+        # 否则 shell 的 globstar 默认关闭，`**` 会退化成 `*` 漏掉子目录）。
         run: |
-          pnpm exec node --experimental-strip-types --test \
-            lib/transport.test.ts \
-            lib/reconnect.test.ts \
-            lib/analytics/analytics.test.ts \
-            lib/analytics/runtime.test.ts
+          pnpm exec node --experimental-strip-types --test "lib/**/*.test.ts"
 
       - name: Build
         run: pnpm run build
@@ -182,6 +185,19 @@ jobs:
           if-no-files-found: warn
 
   # ============== Doc cross-links ==============
+  # v2.6.1 修复（2026-09-21）：这里原本**漏写了 job ID**，写成
+  #     # ===== Doc cross-links =====
+  #       name: Doc cross-links      <-- 4 空格缩进，没有 `  doc-links:`
+  #       runs-on: ubuntu-latest
+  #       steps: ...
+  # 于是这三行被并进了上一个 job `dep-audit` 的 mapping，与它的
+  # name / runs-on / steps **重复定义**。后果二选一，都很难看：
+  #   1) YAML 解析报 duplicate key → 整个 test.yml 失效（CI 全不跑）
+  #   2) 解析器 last-wins → dep-audit 的 steps 被覆盖，
+  #      govulncheck / npm audit 静默不执行，而这个 job 的"名字"还叫
+  #      Dependency audit，看板上一片绿但其实什么都没跑
+  # 现在补上 job ID，两个 job 各自独立。
+  doc-links:
     name: Doc cross-links
     runs-on: ubuntu-latest
     steps:
