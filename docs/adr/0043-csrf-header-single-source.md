@@ -176,6 +176,35 @@ YAML 里注释不会关闭 block，这三行被**并进上一个 job `dep-audit`
 1. **YAML 解析报 duplicate key** → 整个 `test.yml` 无效，CI 全不跑
 2. **解析器 last-wins** → `dep-audit` 的 `steps` 被覆盖成"只跑 ADR 计数检查"，**`govulncheck` 与 `pnpm audit`（P1-6 依赖审计）静默不执行**，而看板上这个 job 依然叫 "Dependency audit"、依然显示绿色
 
+### 5.1.1 实际命中的是第 1 种（已用 GitHub API 取证）
+
+查 `971b99b` 之后每一次 push 的 Test 运行，全部 `conclusion=failure`，且**特征完全一致**：
+
+```
+name: ".github/workflows/test.yml"     ← 不是 "Test"，回落到文件路径
+status: completed   conclusion: failure
+created_at == updated_at               ← 瞬时失败（0 秒，没有任何 job 跑过）
+jobs: total_count = 0                  ← 一个 job 都没有
+check-runs: total_count = 0            ← 连 check 都没注册
+```
+
+`name` 回落成文件路径 + 0 job + 0 check-run + 瞬时失败，是 GitHub「**workflow 文件无效**」的确切签名。
+
+**结论：`.github/workflows/test.yml` 自引入 `Doc cross-links` 那一次改动起，就再也没有执行过任何一个 job。** 不是"某个 job 静默跳过"，是**整条 CI 完全没跑**，而每次 push 的红色结论只表现为一个没有 job 的空运行。
+
+修好后同一次 push（`b85e6e5`）立刻变了：
+
+```
+name: Test                     ← 正常
+jobs: total_count = 4
+Backend (Go)        => success
+Doc cross-links     => success  ← 首次作为独立 job 存在
+Frontend (Next.js)  => failure  ← 卡在 pnpm install（另一问题，见 §5.3）
+Dependency audit    => failure  ← 卡在 pnpm install --frozen-lockfile（同上）
+```
+
+即：**一个漏写的 job ID，让整套 CI 静默失效了（无法从"红色"本身看出程度）。** 漏写的那 4 个空格，代价是一切自动化验证都没了。
+
 无论命中哪一种，"CI 是绿的"这个信号都不可信。已补上 `  doc-links:` job ID，`jobs` 恢复为 4 个（`backend-test` / `frontend-test` / `dep-audit` / `doc-links`），重复 key 归零。
 
 ### 5.2 CI 前端测试是硬编码文件清单 —— 新护栏从来没跑过
@@ -200,18 +229,81 @@ pnpm exec node --experimental-strip-types --test "lib/**/*.test.ts"
 
 同名修正也应用到 `frontend/package.json` 的 `test` 脚本：原 `$(find lib -name '*.test.ts')` 依赖 POSIX shell，在 Windows 上 npm 用 cmd 执行 `scripts` → 本地 `npm test` 直接失败。改成 glob 后跨平台一致（本地实测 117 项）。
 
+> ⚠️ **但护栏目前仍不会在 CI 生效**：`frontend-test` job 卡在更前面的 `Install dependencies`（`pnpm install`），
+> `Type check` / `Unit tests` / `Build` 三步全部 `skipped`。详见 §5.3，这是**独立且尚未修复**的问题。
+
+### 5.3 未修复（本轮仅定位）：CI 里两个 job 的 `pnpm install` 都失败
+
+修好 workflow 结构后，第一次真实运行暴露出：**两个需要装前端依赖的 job 都死在 install**。
+
+| job | 失败步骤 | 后续步骤 |
+|---|---|---|
+| `Frontend (Next.js)` | `Install dependencies`（`pnpm install`） | `Type check` / `Unit tests` / `Build` **全部 skipped** |
+| `Dependency audit` | `pnpm install (frozen lockfile)` | `pnpm audit (high+)` **skipped** |
+
+已排除的可能：
+
+| 假设 | 验证方式 | 结果 |
+|---|---|---|
+| 锁文件与 `package.json` 不一致 | 逐项对比 `pnpm-lock.yaml` 的 `importers['.']` specifier 与 `package.json` | ✅ 完全一致（`lockfileVersion: 9.0`） |
+| CI 用 pnpm 9、本地 pnpm 11，版本偏斜导致 `--frozen-lockfile` 拒绝 | 用 `pnpm@9.15.9 install --frozen-lockfile --lockfile-only` 校验 | ✅ 1 秒通过，锁文件本身没问题 |
+
+结论：**不是锁文件问题，故障发生在真实下载/安装阶段**（网络、postinstall 构建脚本或某个包的解析）。
+
+> 待办：拿到 CI 日志正文才能定位（`/actions/jobs/<id>/logs` 需要鉴权）。本地已复现实验（`CI=true pnpm@9 install --frozen-lockfile`），
+> 若本地能通过而 CI 不能，则应往 runner 侧的网络/缓存方向查；若本地同样失败，则拿到了真实报错。
+
+**这一条直接削弱了 §5.2 的收益**：glob 改动让测试文件"会被执行"，但只要 install 先失败，护栏依然不会跑。
+必须把这个修掉，"CI 绿了"才重新可信。
+
 ---
 
 ## 6. 验证
 
-| 观测项 | 修复前（公网） | 修复后 |
+| 观测项 | 修复前（公网） | 修复后（公网实测） |
 |---|---|---|
 | `POST .../start` | 200 | 200 |
-| `POST .../events` | **403 `CSRF_TOKEN_MISMATCH` ×15+** | 200（待部署后实测确认） |
-| 埋点请求携带的 header | `Content-Type` + `Authorization` | 再加 `X-XSRF-TOKEN` |
+| `POST .../events` | **403 `CSRF_TOKEN_MISMATCH` ×15+** | **200 ×1，403 = 0** |
+| 埋点请求携带的 header | `Content-Type` + `Authorization` | 追加 `X-XSRF-TOKEN`（实测 `csrf=有`） |
+| `decision_events` 表（该庭审） | 前端事件 0 行 | `fe.trial_started` / `state_transition` 各 1 行，`status=ok` |
+| 页面错误 | 15+ 条 403 error | 无 |
 | `npm test`（Windows 本地） | 失败（cmd 不认 `$(find)`） | 117 pass / 0 fail |
-| `test.yml` 重复 job key | 3 处 → 整个 workflow 可信度受损 | 0 处；jobs = 4 |
-| CI 是否执行 auth/random/csrf 三个测试文件 | 否（不在硬编码清单里） | 是（glob 自动纳入） |
+| `test.yml` 是否真的执行 | **从未执行**（文件无效，0 job） | 4 job 正常启动 |
+| CI 是否执行 auth/random/csrf 三个测试文件 | 否（文件从未被解析） | 已纳入 glob，**但当前仍被 install 失败阻断**（§5.3） |
+
+### 6.1 公网验证原始输出（关键片段）
+
+```
+===== 1) 打开 http://49.235.176.27:8080/ =====
+  isSecureContext = false
+  XSRF-TOKEN 在 document.cookie 里 = true
+
+===== 2) 立案 =====
+  pathname = /court/8b707f81-0778-4a69-93b9-4828b35a128a
+
+===== 4) /events 请求明细 =====
+  200  csrf=有(LjE3ODk5…)  auth=yes  cookie=no
+
+===== 5) 结论 =====
+  403 数量        = 0  ✅
+  2xx 数量        = 1  ✅
+  漏带 CSRF 的请求 = 0  ✅ 全部带上了 X-XSRF-TOKEN
+
+--- 页面错误 ---
+  无
+```
+
+服务端落库确认：
+
+```
+    event_type    | status | count
+------------------+--------+-------
+ fe.trial_started | ok     |     1
+ state_transition | ok     |     1
+```
+
+> 请求数从"15+ 次 403"变成"1 次 200"是符合预期的：以前是**同一个事件失败后回填队列、每 5s 重试**，
+> 看起来数量多其实只有 1 个事件在反复撞墙；现在一次成功就出队，不再重试。
 
 ---
 
