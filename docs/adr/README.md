@@ -47,6 +47,10 @@
 | [0034-supersede](./0034-supersede-2-5d-r3f.md) | **v2.0 剪影小人 supersede by 2.5D r3f 重构（用户反馈"简陋，要重做"，2026-08-22）** | ⚠️ **Archived** by [0034-archive](./0034-archive-3d-pivot.md) | r3f + drei + three-pathfinding 选型；4 stage 串行推进；删除 silhouettes/ 整个目录 — **PR-D2.9 二次归档，最终未采用 3D 路线** |
 | [0034-archive](./0034-archive-3d-pivot.md) | **v2.0 REDESIGN 3D 路线二次归档（PR-D2.9 放弃，2026-08-23）** | ✅ **Archived** | 用户决定"放弃 3D，保留圆点"——git reset --hard 5fd803b 完全回退 11 个 commit。详见 [Postmortem](../postmortem/v2.0-redesign-3d-pivot.md) |
 | [0035](./0035-judge-does-not-speak.md) | **法官不发言：v2.1 isJudging 死代码清理 + 保留未来启用能力** | ✅ | `frontend/components/courtroom/AgentAvatar.tsx` + `RoleSilhouette.tsx` + `DotAvatar.tsx` + `Silhouette.tsx` + `AvatarAnimations.tsx`（删 isJudging prop + 保留 judgeVariant / silhouette-gavel / dot-judge-shock CSS 资产） |
+| [0041](./0041-csrf-cookie-path-fix.md) | **CSRF Token Cookie 的 Path 必须为 `/`（修复"点立案开庭 100% 403"）** | ✅ | `backend/internal/middleware/csrf.go`（`CookiePath` 1 行）+ `csrf_test.go`（新增 2 个回归测试） |
+
+> ⚠️ **索引缺口（2026-09-21 发现）**：0037 / 0038 / 0039 / 0040 四份 ADR 已存在但未登记到本索引。
+> 本次仅补登 0041（新增者），未回填历史条目——回填需逐份核对内容，另行处理。
 
 ---
 

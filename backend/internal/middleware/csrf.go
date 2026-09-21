@@ -14,10 +14,25 @@ package middleware
 // 设计权衡（vs gorilla/csrf）：
 //   - **手写不引入新依赖**（gorilla/csrf 加深 v2.5 commit 范围 + 大版本绑定）
 //   - 使用 HMAC 签名而非随机 token：服务端校验时可重新计算签名，无需存表
-//   - Cookie Path=/api/v1，Domain 与 dc_session 一致（SameSite=Lax 已有 CSRF 部分防御）
+//   - Cookie Path=/（**必须**，见下方「CookiePath 必须为 /」说明）
 //   - **豁免** GET / HEAD / OPTIONS（idempotent method 不应触发 CSRF 校验）
 //   - **豁免** /auth/anon（注册 / 首次登录，本身就要发 token）
 //   - **WS 升级** 不强制 CSRF（浏览器 WS API 不让设自定义 header；改用 Origin 白名单已实装）
+//
+// # CookiePath 必须为 "/"（2026-09-21 修复）
+//
+// 原实现设 Path=/api/v1，注释理由是"让 JS 在 API 请求域下读得到"——**这个推理是错的**。
+// 浏览器规范（RFC 6265 §5.4）规定：`document.cookie` 只暴露 path 能匹配**当前文档 URL**
+// 的 cookie，而 `Set-Cookie` 的 path 匹配的是**请求 URL**。本项目前端页面在 `/`（及
+// `/court/*`、`/verdict/*`），文档路径永远匹配不上 `/api/v1`，于是：
+//
+//	document.cookie  →  ""            （读不到 XSRF-TOKEN）
+//	POST /api/v1/xxx →  自动带 cookie 但 header 为空 → 403 CSRF_TOKEN_MISMATCH
+//
+// 结果就是「点立案开庭必报 403」。设 Path=/ 后端读 cookie 的行为完全不变（cookie 会随
+// 所有同源请求发送），只是让 JS 也能读到——这正是 double-submit 模式的前提。
+// 单测看不出来：httptest 不模拟 document.cookie 的可见性语义。
+
 //
 // 关键不变量：
 //   - 签名密钥 = JWT_SECRET（同源密钥复用，避免新增 env）
@@ -47,7 +62,12 @@ type CSRFConfig struct {
 	CookieName string
 	// HeaderName 前端必须塞的 header 名。默认 "X-XSRF-TOKEN"。
 	HeaderName string
-	// CookiePath Set-Cookie Path。默认 "/api/v1"（让 JS 在 API 请求域下读得到）。
+	// CookiePath Set-Cookie Path。
+	//
+	// 默认 "/" —— **不要改窄**。前端靠 document.cookie 读这个 token，
+	// 而 document.cookie 只暴露 path 能匹配「当前文档 URL」的 cookie。
+	// 设成 /api/v1 会让前端页面（/、/court/*、/verdict/*）一律读不到，
+	// 于是所有 POST 都因 header 为空而 403。详见文件头「CookiePath 必须为 "/"」。
 	CookiePath string
 	// MaxAge cookie 有效期。默认 24h。
 	MaxAge time.Duration
@@ -61,7 +81,7 @@ func DefaultCSRFConfig(secret []byte) CSRFConfig {
 		Secret:     secret,
 		CookieName: "XSRF-TOKEN",
 		HeaderName: "X-XSRF-TOKEN",
-		CookiePath: "/api/v1",
+		CookiePath: "/",
 		MaxAge:     24 * time.Hour,
 		SkipPaths:  []string{"/auth/anon", "/auth/login"},
 	}
@@ -155,7 +175,7 @@ func CSRF(cfg CSRFConfig) gin.HandlerFunc {
 		cfg.HeaderName = "X-XSRF-TOKEN"
 	}
 	if cfg.CookiePath == "" {
-		cfg.CookiePath = "/api/v1"
+		cfg.CookiePath = "/"
 	}
 	if cfg.MaxAge <= 0 {
 		cfg.MaxAge = 24 * time.Hour
